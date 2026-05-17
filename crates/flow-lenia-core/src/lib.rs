@@ -15,6 +15,7 @@ pub mod growth;
 pub mod kernel;
 pub mod overlap;
 pub mod params;
+pub mod reintegrate;
 pub mod sobel;
 pub mod state;
 
@@ -25,6 +26,7 @@ pub use flow::flow;
 pub use kernel::{compute_kernel, effective_radius, sigmoid};
 pub use overlap::overlap_area;
 pub use params::{KernelEntry, KernelParams, SamplingSettings};
+pub use reintegrate::reintegrate;
 pub use sobel::{grad_a_sum, sobel, sobel_per_channel, sobel_x, sobel_y, SobelGradients};
 pub use state::{
     sum_channels, ActivationField, AlphaField, FlowField, FlowFieldExt, AXIS_C, AXIS_FLOW, AXIS_H,
