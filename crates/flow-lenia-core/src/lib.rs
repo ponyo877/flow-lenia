@@ -13,6 +13,7 @@ pub mod convolve;
 pub mod flow;
 pub mod growth;
 pub mod kernel;
+pub mod overlap;
 pub mod params;
 pub mod sobel;
 pub mod state;
@@ -22,6 +23,7 @@ pub use config::{BorderMode, FlowLeniaConfig, MixRule};
 pub use convolve::convolve2d;
 pub use flow::flow;
 pub use kernel::{compute_kernel, effective_radius, sigmoid};
+pub use overlap::overlap_area;
 pub use params::{KernelEntry, KernelParams, SamplingSettings};
 pub use sobel::{grad_a_sum, sobel, sobel_per_channel, sobel_x, sobel_y, SobelGradients};
 pub use state::{
