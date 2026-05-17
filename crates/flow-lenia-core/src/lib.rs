@@ -12,10 +12,12 @@ pub mod convolve;
 pub mod growth;
 pub mod kernel;
 pub mod params;
+pub mod sobel;
 
 pub use config::{BorderMode, FlowLeniaConfig, MixRule};
 pub use convolve::convolve2d;
 pub use kernel::{compute_kernel, effective_radius, sigmoid};
 pub use params::{KernelEntry, KernelParams, SamplingSettings};
+pub use sobel::{sobel, sobel_x, sobel_y, SobelGradients};
 // `growth::growth` would shadow the module name when re-exported, so
 // callers use `flow_lenia_core::growth::{bell, growth}` directly.
