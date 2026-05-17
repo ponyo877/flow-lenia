@@ -71,6 +71,21 @@ Toolchain: Rust **1.76.0** stable (pinned via `rust-toolchain.toml`).
 
 See `DESIGN.md` §8 for milestone definitions and completion criteria.
 
+## JAX fixture re-generation (optional, M1.6 L2)
+
+The L2 smoke test (`crates/flow-lenia-core/tests/jax_fixture_smoke.rs`)
+compares Rust convolution output against JAX `jax.scipy.signal.convolve2d`
+fixtures committed to `tests/fixtures/`. Re-generate only if `CASES` in the
+script changes:
+
+```sh
+python3 -m venv .venv-fixtures
+.venv-fixtures/bin/pip install -U pip 'jax[cpu]' numpy
+.venv-fixtures/bin/python scripts/generate_jax_fixtures.py
+```
+
+`.venv-fixtures/` is gitignored. CI does not need a JAX environment.
+
 ## License
 
 Dual-licensed under either Apache-2.0 or MIT, at your option.

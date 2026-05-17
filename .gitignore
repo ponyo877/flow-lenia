@@ -49,3 +49,6 @@ flamegraph.svg
 
 # JAX reference repo (LICENSE 不明のためローカルのみ。再取得手順は README 参照)
 /references/FlowLenia-jax/
+
+# Python venv for fixture-generation scripts (see scripts/generate_jax_fixtures.py)
+/.venv-fixtures/

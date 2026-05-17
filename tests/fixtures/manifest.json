@@ -1,0 +1,29 @@
+[
+  {
+    "name": "case1_R5_r0.5_torus",
+    "grid_size": 32,
+    "kernel_size": 21,
+    "border": "torus",
+    "R": 5.0,
+    "r": 0.5,
+    "seed": 42
+  },
+  {
+    "name": "case2_R10_r0.7_torus",
+    "grid_size": 32,
+    "kernel_size": 37,
+    "border": "torus",
+    "R": 10.0,
+    "r": 0.7,
+    "seed": 1337
+  },
+  {
+    "name": "case3_R5_r0.5_wall",
+    "grid_size": 32,
+    "kernel_size": 21,
+    "border": "wall",
+    "R": 5.0,
+    "r": 0.5,
+    "seed": 42
+  }
+]
