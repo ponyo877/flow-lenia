@@ -8,7 +8,9 @@
 //! Contents are populated incrementally from M1.2 onwards.
 
 pub mod config;
+pub mod kernel;
 pub mod params;
 
 pub use config::{BorderMode, FlowLeniaConfig, MixRule};
-pub use params::{KernelEntry, KernelParams};
+pub use kernel::{compute_kernel, effective_radius, sigmoid};
+pub use params::{KernelEntry, KernelParams, SamplingSettings};
