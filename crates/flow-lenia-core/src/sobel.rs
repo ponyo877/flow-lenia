@@ -22,7 +22,8 @@
 
 use crate::config::BorderMode;
 use crate::convolve::convolve2d;
-use ndarray::{array, Array2};
+use crate::state::{sum_channels, ActivationField, FLOW_DX, FLOW_DY};
+use ndarray::{array, s, Array2, Array3, Array4};
 
 /// 180°-rotated `kx` — our `convolve2d` is correlation, JAX `convolve2d`
 /// is convolution, so we flip the JAX kernel once here. Kernel coefficients
@@ -74,6 +75,55 @@ pub fn sobel_x(a: &Array2<f32>, border: BorderMode) -> Array2<f32> {
 #[must_use]
 pub fn sobel_y(a: &Array2<f32>, border: BorderMode) -> Array2<f32> {
     convolve2d(a, &ky_correlation(), border)
+}
+
+/// Compute per-channel Sobel gradients of a 3D field.
+///
+/// Input shape `(H, W, C)`, output shape `(H, W, 2, C)` — the size-2 third
+/// axis follows the `FlowField` convention with [`FLOW_DY`] at index 0
+/// and [`FLOW_DX`] at index 1 (see [`crate::state`]).
+///
+/// Each channel is processed independently by calling [`sobel`] on the
+/// corresponding `Array2` slice. Output is bit-for-bit identical to
+/// looping `sobel(a.slice(s![.., .., ci]).to_owned(), border)` per
+/// channel — this is the contract pinned by the
+/// `sobel_per_channel_matches_independent_calls` test.
+#[must_use]
+pub fn sobel_per_channel(field: &ActivationField, border: BorderMode) -> Array4<f32> {
+    let (h, w, c) = field.dim();
+    let mut out = Array4::<f32>::zeros((h, w, 2, c));
+    for ci in 0..c {
+        // `to_owned()` is required because `sobel` takes `&Array2<f32>`,
+        // not `&ArrayView2<f32>`. Per-channel cost is one allocation of
+        // (H, W) f32 — negligible against the convolution itself.
+        let channel = field.slice(s![.., .., ci]).to_owned();
+        let g = sobel(&channel, border);
+        out.slice_mut(s![.., .., FLOW_DY, ci]).assign(&g.dy);
+        out.slice_mut(s![.., .., FLOW_DX, ci]).assign(&g.dx);
+    }
+    out
+}
+
+/// Compute the gradient of the total mass `A_Σ = Σ_c A_c`.
+///
+/// Returns shape `(H, W, 2)` with the same flow-axis indexing as
+/// [`sobel_per_channel`] / [`crate::state::FlowField`] ([`FLOW_DY`] at 0,
+/// [`FLOW_DX`] at 1). This is the diffusion-term direction in paper
+/// Eq. 5 (`-α · ∇A_Σ`).
+///
+/// Equivalent to `sum_channels(a)` followed by [`sobel`] — pinned by
+/// the `grad_a_sum_matches_explicit_computation` test. We expose it as
+/// a single entry point so callers (M1.13 step-update integration) do
+/// not need to remember the (sum → sobel) chain or its axis order.
+#[must_use]
+pub fn grad_a_sum(a: &ActivationField, border: BorderMode) -> Array3<f32> {
+    let a_sum = sum_channels(a);
+    let g = sobel(&a_sum, border);
+    let (h, w) = g.dy.dim();
+    let mut out = Array3::<f32>::zeros((h, w, 2));
+    out.slice_mut(s![.., .., FLOW_DY]).assign(&g.dy);
+    out.slice_mut(s![.., .., FLOW_DX]).assign(&g.dx);
+    out
 }
 
 #[cfg(test)]
@@ -285,6 +335,75 @@ mod tests {
             }
             for ((y, x), &v) in g.dy.indexed_iter() {
                 assert_eq!(v.to_bits(), dy_alone[[y, x]].to_bits(), "dy @ ({y}, {x})");
+            }
+        }
+    }
+
+    // ─── sobel_per_channel / grad_a_sum (M1.9 helpers) ───────────────
+
+    /// `sobel_per_channel(a)` per-channel slice ≡ `sobel(a.slice(c))`
+    /// bit-for-bit, for every channel and both border modes. This is
+    /// the contract the (H, W, 2, C) layout promises: no reordering or
+    /// extra accumulation happens inside the helper.
+    #[test]
+    fn sobel_per_channel_matches_independent_calls() {
+        let a: ActivationField = ndarray::Array3::from_shape_fn((8, 8, 3), |(y, x, ci)| {
+            ((y * 13 + x * 7 + ci * 5) % 11) as f32 / 11.0
+        });
+
+        for border in [BorderMode::Wall, BorderMode::Torus] {
+            let pc = sobel_per_channel(&a, border);
+            assert_eq!(pc.shape(), &[8, 8, 2, 3]);
+
+            for ci in 0..3 {
+                let slice = a.slice(s![.., .., ci]).to_owned();
+                let g = sobel(&slice, border);
+                for y in 0..8 {
+                    for x in 0..8 {
+                        assert_eq!(
+                            pc[[y, x, FLOW_DY, ci]].to_bits(),
+                            g.dy[[y, x]].to_bits(),
+                            "dy mismatch @ ({y}, {x}, ci={ci}, border={border:?})"
+                        );
+                        assert_eq!(
+                            pc[[y, x, FLOW_DX, ci]].to_bits(),
+                            g.dx[[y, x]].to_bits(),
+                            "dx mismatch @ ({y}, {x}, ci={ci}, border={border:?})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// `grad_a_sum(a) ≡ sobel(sum_channels(a))` bit-for-bit. Pins the
+    /// (sum_channels → sobel) wiring so future refactors of either
+    /// helper cannot silently change the gradient direction or order.
+    #[test]
+    fn grad_a_sum_matches_explicit_computation() {
+        let a: ActivationField = ndarray::Array3::from_shape_fn((8, 8, 3), |(y, x, ci)| {
+            ((y * 13 + x * 7 + ci * 5) % 11) as f32 / 11.0
+        });
+
+        for border in [BorderMode::Wall, BorderMode::Torus] {
+            let direct = grad_a_sum(&a, border);
+            assert_eq!(direct.shape(), &[8, 8, 2]);
+
+            let summed = sum_channels(&a);
+            let g = sobel(&summed, border);
+            for y in 0..8 {
+                for x in 0..8 {
+                    assert_eq!(
+                        direct[[y, x, FLOW_DY]].to_bits(),
+                        g.dy[[y, x]].to_bits(),
+                        "dy mismatch @ ({y}, {x}, border={border:?})"
+                    );
+                    assert_eq!(
+                        direct[[y, x, FLOW_DX]].to_bits(),
+                        g.dx[[y, x]].to_bits(),
+                        "dx mismatch @ ({y}, {x}, border={border:?})"
+                    );
+                }
             }
         }
     }

@@ -10,6 +10,7 @@
 pub mod alpha;
 pub mod config;
 pub mod convolve;
+pub mod flow;
 pub mod growth;
 pub mod kernel;
 pub mod params;
@@ -19,9 +20,13 @@ pub mod state;
 pub use alpha::alpha;
 pub use config::{BorderMode, FlowLeniaConfig, MixRule};
 pub use convolve::convolve2d;
+pub use flow::flow;
 pub use kernel::{compute_kernel, effective_radius, sigmoid};
 pub use params::{KernelEntry, KernelParams, SamplingSettings};
-pub use sobel::{sobel, sobel_x, sobel_y, SobelGradients};
-pub use state::{ActivationField, AlphaField, AXIS_C, AXIS_H, AXIS_W};
+pub use sobel::{grad_a_sum, sobel, sobel_per_channel, sobel_x, sobel_y, SobelGradients};
+pub use state::{
+    sum_channels, ActivationField, AlphaField, FlowField, FlowFieldExt, AXIS_C, AXIS_FLOW, AXIS_H,
+    AXIS_W, FLOW_DX, FLOW_DY,
+};
 // `growth::growth` would shadow the module name when re-exported, so
 // callers use `flow_lenia_core::growth::{bell, growth}` directly.
