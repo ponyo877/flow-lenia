@@ -7,17 +7,21 @@
 //!
 //! Contents are populated incrementally from M1.2 onwards.
 
+pub mod alpha;
 pub mod config;
 pub mod convolve;
 pub mod growth;
 pub mod kernel;
 pub mod params;
 pub mod sobel;
+pub mod state;
 
+pub use alpha::alpha;
 pub use config::{BorderMode, FlowLeniaConfig, MixRule};
 pub use convolve::convolve2d;
 pub use kernel::{compute_kernel, effective_radius, sigmoid};
 pub use params::{KernelEntry, KernelParams, SamplingSettings};
 pub use sobel::{sobel, sobel_x, sobel_y, SobelGradients};
+pub use state::{ActivationField, AlphaField, AXIS_C, AXIS_H, AXIS_W};
 // `growth::growth` would shadow the module name when re-exported, so
 // callers use `flow_lenia_core::growth::{bell, growth}` directly.
