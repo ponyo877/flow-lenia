@@ -1,0 +1,2044 @@
+                                                         Lenia — Biology of Artificial Life
+                                                                        Bert Wang-Chak Chan∗
+
+
+
+
+arXiv:1812.05433v3 [nlin.CG] 4 May 2019
+                                                                             Hong Kong
+                                                                                 Mar 2019
+
+
+                                                                                   Abstract
+                                                     We report a new system of artificial life called Lenia (from Latin lenis
+                                                 “smooth”), a two-dimensional cellular automaton with continuous space-
+                                                 time-state and generalized local rule. Computer simulations show that
+                                                 Lenia supports a great diversity of complex autonomous patterns or “life-
+                                                 forms” bearing resemblance to real-world microscopic organisms. More
+                                                 than 400 species in 18 families have been identified, many discovered via
+                                                 interactive evolutionary computation. They differ from other cellular au-
+                                                 tomata patterns in being geometric, metameric, fuzzy, resilient, adaptive,
+                                                 and rule-generic.
+                                                     We present basic observations of the system regarding the properties
+                                                 of space-time and basic settings. We provide a broad survey of the life-
+                                                 forms, categorize them into a hierarchical taxonomy, and map their dis-
+                                                 tribution in the parameter hyperspace. We describe their morphological
+                                                 structures and behavioral dynamics, propose possible mechanisms of their
+                                                 self-propulsion, self-organization and plasticity. Finally, we discuss how
+                                                 the study of Lenia would be related to biology, artificial life, and artificial
+                                                 intelligence.
+
+                                              Keywords: artificial life; geometric cellular automata; complex system
+
+
+                                          1      Introduction
+                                          Among the long-term goals of artificial life are to simulate existing biological
+                                          life and to create new life forms using artificial systems. These are expressed
+                                          in the fourteen open problems in artificial life [1], in which number three is of
+                                          particular interest here:
+                                                 Determine whether fundamentally novel living organizations can exist.
+                                              There have been numerous efforts in creating and studying novel mathemati-
+                                          cal systems that are capable of simulating complex life-like dynamics. Examples
+                                          include particle systems like Swarm Chemistry [2], Primordial Particle Systems
+                                              ∗ albert.chak@gmail.com
+
+
+
+
+                                                                                       1
+(PPS) [3]; reaction-diffusion systems like the U-Skate World [4]; cellular au-
+tomata like the Game of Life (GoL) [5], elementary cellular automata (ECA)
+[6]; evolutionary systems like virtual creatures [7], soft robots [8, 9]. These
+systems have a common theme — let there be countless modules or particles
+and (often localized) interactions among them, a complex system with interest-
+ing autonomous patterns will emerge, just like how life emerged on Earth 4.28
+billion years ago [10].
+    Life can be defined as the capabilities of self-organizing (morphogenesis), self-
+regulating (homeostasis), self-directing (motility), self-replicating (reproduc-
+tion), entropy reduction (metabolism), growth (development), response to stim-
+uli (sensitivity), response to environment (adaptability), and evolving through
+mutation and selection (evolvability) (e.g., [11, 12, 13, 14]). Systems of artifi-
+cial life are able to reproduce some of these capabilities with various levels of
+fidelity. Lenia, the subject of this paper, is able to achieve many of them, except
+self-replication that is yet to be discovered.
+    Lenia also captures a few subjective characteristics of life, like vividness,
+fuzziness, aesthetic appeal, and the great diversity and subtle variety in patterns
+that a biologist would have the urge to collect and catalogue them. If there is
+some truth in the biophilia hypothesis [15] that humans are innately attracted to
+nature, it may not be too far-fetched to suggest that these subjective experiences
+are not merely feelings but among the essences of life as we know it.
+    Due to similarities between life on Earth and Lenia, we borrow terminologies
+and concepts from biology, like taxonomy (corresponds to categorization), bi-
+nomial nomenclature (naming), ecology (parameter space), morphology (struc-
+tures), behavior (dynamics), physiology (mechanisms), and allometry (statis-
+tics). We also borrow space-time (grid and time-step) and fundamental laws
+(local rule) from physics. With a few caveats, these borrowings are useful in
+providing more intuitive characterization of the system, and may facilitate dis-
+cussions on how Lenia or similar systems could give answers to life [16], the
+universe [17], and everything.
+
+1.1    Background
+A cellular automaton (CA, plural: cellular automata) is a mathematical system
+where a grid of sites, each having a particular state at a moment, are being
+updated repeatedly according to a local rule and each site’s neighboring sites.
+Since its conception by John von Neumann and Stanislaw Ulam [18, 19], var-
+ious CAs have been investigated, the most famous being Stephen Wolfram’s
+one-dimensional elementary cellular automata (ECA) [6, 17] and John H. Con-
+way’s two-dimensional Game of Life (GoL) [5, 20]. GoL is the starting point
+of where Lenia came from. It produces a whole universe of interesting patterns
+[21] ranging from simple “still lifes”, “oscillators” and “spaceships”, to com-
+plex constructs like pattern emitters, self-replicators, and even fully operational
+computers thanks to its Turing completeness [22].
+    Several aspects of GoL can be generalized. A discrete singular property
+(e.g. dead-or-alive state) can be extended into a range (multi-state), normalized
+
+
+                                         2
+       #    System                Type*           Space      Neighborhood        N. sum
+       1    ECA, GoL                CA          singular      nearest cube     totalistic
+       2    Continuous ECA          CA          singular      nearest cube     totalistic
+       3    Continuous GoL          EA        continuous    continuous ball    totalistic
+       4    Primordia               CA          singular      nearest cube     totalistic
+       5    Larger-than-Life    CA / GCA       fractional    extended cube     totalistic
+       6    RealLife                EA        continuous    continuous cube    totalistic
+       7    SmoothLife             GCA         fractional    extended shell    totalistic
+       8    Discrete Lenia         GCA         fractional    extended ball      weighted
+       9    Continuous Lenia        EA        continuous    continuous ball     weighted
+       #    Ref. and notes        Growth        Update             Time           State
+       1    [17, 5]              intervals       replace         singular       singular
+       2    [17]                 mapping         replace         singular     continuous
+       3    [23]                 mapping         replace         singular     continuous
+       4    †                    intervals       replace         singular      extended
+       5    [24, 25]             intervals       replace         singular       singular
+       6    [26]                 intervals       replace         singular       singular
+       7    [27]‡                intervals    increment         fractional     fractional
+       8                         mapping      increment         fractional     fractional
+       9                         mapping      increment        continuous     continuous
+
+Table 1: Comparison of genericity and continuity in various CAs. (* GCA =
+geometrical cellular automata, EA = Euclidean automata, see “Discussion”. † Primordia is
+a precursor to Lenia, written in JavaScript/HTML by the author circa 2005. It had multi-
+states and extended survival/birth intervals. ‡ SmoothLife and Lenia, being independent
+developments, exhibit striking resemblance in system and generated patterns. This can be
+considered an instance of “convergent evolution”.)
+
+
+to a fractional property in the unit range, and becomes continuous by further
+splitting the range into infinitesimals (real number state). The local rule can
+be generalized from the basic ECA/GoL style (e.g. totalistic sum) to smooth
+parameterized operations (weighted sum).
+    By comparing various CAs that possess autonomous soliton patterns, we
+observe the evolution of generalization with increasing genericity and continuity
+(Table 1, Figure 1). This suggests that Lenia is currently at the latest stage of
+generalizing GoL, although there may be room for further generalizations.
+
+
+2      METHODS
+We describe the methods of constructing and studying Lenia, including its math-
+ematical definition, computer simulation, strategies of evolving new lifeforms,
+and how to perform observational and statistical analysis.
+
+2.1        Definitions
+Mathematically, a CA is defined by a 5-tuple1 A = (L, T , S, N , φ), where L is
+the d-dimensional lattice or grid, T is the timeline, S is the state set, N ⊂ L is
+the neighborhood of the origin, φ : S N → S is the local rule.
+   Define At : L → S as a configuration or pattern (i.e. collection of states over
+the whole grid) at time t ∈ T . At (x) is the state of site x ∈ L, and At (Nx ) =
+    1 Conventionally a 4-tuple with the timeline T   omitted.
+
+
+                                               3
+Figure 1: Patterns in artificial life systems: cellular automata (a-b, e-g),
+reaction-diffusion (b) and particle swarm (c). (↑= orthogonal; %= diagonal;
+•% = omnidirectional; scale bar is unit length = kernel radius). (a) Game of
+Life (GoL): “glider”. (b) Primordia: “DX:8/762”. (c) U-Skate World: “Jel-
+lyfish” [28]. (d) Swarm Chemistry: “Fast Walker & Slow Follower” [29]. (e)
+Larger-than-Life (LtL): “bug with stomach” using ball neighborhood, “bug with
+ribbed stomach”, “bug with wings” [30]. (f ) SmoothLife: “smooth glider”,
+“pulsating glider”, “wobbly glider” [27, 31, 32]. (g) Lenia: Scutium, Kronium,
+Pyroscutium.
+
+
+{At (n) : n ∈ Nx } is the state collection over the sites neighborhood Nx = {x +
+n : n ∈ N }. The global rule is Φ : S L → S L such that Φ(A)(x) = φ(A (Nx )).
+Starting from an initial configuration A0 , the grid is updated according to the
+global rule Φ for each time-step ∆t, leading to the following time-evolution:
+
+            Φ(A0 ) = A∆t , Φ(A∆t ) = A2∆t , . . . , Φ(At ) = At+∆t , . . .   (1)
+
+After N repeated updates (or generations):
+
+                                ΦN (At ) = At+N ∆t                           (2)
+
+
+2.1.1   Definition of Game of Life
+Take GoL as an example, AGoL = (L, T , S, N , φ), where L = Z2 is the two-
+dimensional discrete grid; T = Z is the discrete timeline; S = {0, 1} is the
+
+
+                                          4
+Figure 2: Neighborhoods in various CAs. (a) 8-site Moore neighborhood in
+GoL. (b-d) Neighborhoods in Lenia, including range R extended neighborhood
+(b) and its normalization (c) in discrete Lenia, and the unit ball neighborhood
+in continuous Lenia (d).
+
+
+
+
+Figure 3: Core functions in Lenia. (a-c) Cross-section of the kernel: kernel
+core KC (r) using exponential function (a), and kernel shell KS (r; β) with peaks
+β = (1, 32 , 13 ) using exponential (b) or rectangular core function (c). (d-e) Kernel
+core (d) and kernel shell (e) as displayed in the grid, showing the “influence”
+(convolution weight) of the site on its neighborhood (darker = larger weight,
+more influence). (f-g) Growth mapping G(u; µ, σ) with µ = 0.3, σ = 0.03 using
+exponential (f) or rectangular (g) function.
+
+
+singular state set; N = {−1, 0, 1}2 is the Moore neighborhood (Chebyshev L∞
+norm) including the site itself and its 8 neighbors (Figure 2(a)).
+    The totalistic neighborhood sum of site x is:
+                                      X
+                             St (x) =      At (x + n)                    (3)
+                                       n∈N
+
+
+
+
+                                          5
+Every site is updated synchronously according to the local rule:
+                     
+                              t              t
+                     1 if A (x) = 0 and S (x) ∈ {3} (birth)
+                     
+            t+1
+          A (x) = 1 if At (x) = 1 and St (x) ∈ {3, 4} (survival)              (4)
+                     
+                       0 otherwise (death)
+                     
+
+
+2.1.2   Definition of Lenia
+Discrete Lenia (DL) generalizes GoL by extending and normalizing the space-
+time-state dimensions. DL is used for computer simulation and analysis, and
+with normalization, patterns from different dimensions can be compared.
+    The state set is extended to S = {0, 1, 2, . . . , P } with maximum P ∈ Z. The
+neighborhood is extended to a discrete ball (Euclidean L2 norm) N = BR [0] =
+{x ∈ L : kxk2 ≤ R} of range R ∈ Z (Figure 2(b)).
+    To normalize, define or redefine R, T, P ∈ Z as the space, time and state
+resolutions, and their reciprocals ∆x = 1/R, ∆t = 1/T, ∆p = 1/P as the site
+distance, time step, and state precision, respectively. The dimensions are scaled
+by the reciprocals (Figure 2(c)):
+
+             L = ∆x Z2 , T = ∆t Z, S = ∆p {0 . . . P }, N = B1 [0]            (5)
+
+    Continuous Lenia (CL) is hypothesized to exist as the resolutions of DL
+approach infinity R, T, P → ∞ and the steps ∆x, ∆t, ∆p become infinitesimals
+dx, dt, dp, the dimensions will approach their continuum limits, i.e. the Eu-
+clidean space, the real timeline, the unit interval states, and the continuous
+unit ball neighborhood (Figure 2(d)):
+
+                    L = R2 , T = R, S = [0, 1], N = B1 [0]                    (6)
+
+   However, there is a cardinality leap between the discrete dimensions in DL
+and the continuous dimensions in CL. The existence of the continuum limit for
+space was proved mathematically in [26], and our computer simulations provide
+empirical evidence for space and time (see “Physics” section).
+
+2.1.3   Local Rule
+To apply Lenia’s local rule to every site x at time t, concolve the grid with a
+kernel K : N → S to yield the potential distribution Ut :
+                                X
+                                
+                                
+                                      K(n)At (x + n) ∆x2      in DL
+            t            t        n∈N
+         U (x) = K ∗ A (x) =      Z                                         (7)
+                                
+                                
+                                        K(n)At (x + n) dx2 in CL
+                                    n∈N
+
+Feed the potential into a growth mapping G : [0, 1] → [−1, 1] to yield the growth
+distribution Gt :
+                               Gt (x) = G(Ut (x))                             (8)
+
+
+                                        6
+Update every site by adding a small fraction ∆t (dt in CL) of the growth and
+clipping back to the unit range [0, 1]; the time is now t + ∆t:
+                                                      1
+                        At+∆t (x) = At (x) + ∆t Gt (x) 0
+                                   
+                                                                                 (9)
+
+where [n]ba = min(max(n, a), b) is the clip function.
+
+2.1.4   Kernel
+The kernel K is constructed by kernel core KC : [0, 1] → [0, 1] which determines
+its detailed “texture”, and kernel shell KS : [0, 1] → [0, 1] which determines its
+overall “skeleton” (Figure 3(a-e)).
+    The kernel core KC is any unimodal function satisfying KC (0) = KC (1) = 0
+and usually KC ( 21 ) = 1. By taking polar distance as argument, it creates a
+uniform ring around the site:
+                                            
+                                        α
+                       
+                        exp α −                  exponential, α = 4
+                                    4r(1 − r)
+                       
+                       
+                       
+                                     α
+                       
+             KC (r) = (4r(1 − r))                 polynomial, α = 4          (10)
+                         1  1 3 (r)               rectangular
+                       
+                       
+                          [ , ]
+                        4 4
+                       
+                       
+                         ...                      or others
+
+where 1A (r) = 1 if r ∈ A else 0 is the indicator function.
+   The kernel shell KS takes a parameter vector β = (β1 , β2 , . . . , βB ) ∈ [0, 1]B
+(kernel peaks) of size B (the rank ) and copies the kernel core into equidistant
+concentric rings with peak heights βi :
+
+                         KS (r; β) = βbBrc KC (Br mod 1)                        (11)
+
+Finally, the kernel is normalized to makes sure K ∗ A ∈ [0, 1]:
+
+                                 KS (knk2 )
+                                K(n) =                                          (12)
+                                   |KS |
+
+where |KS | = N KS ∆x2 in DL, or N KS dx2 in CL.
+             P                  R
+
+   Notes on parameter β:
+
+   • To compare β of different ranks, a vector β is equivalent to one with n
+     trailing zeros while space resolution R is scaled by (B + n)/B at the same
+     time, e.g. β = (1) ≡ (1, 0, 0) with R scaled by 3.
+   • To compare β of the same rank, a vector β where ∀i βi 6= 1 is equivalent
+     to a scaled one β/ max(βi ) such that ∃i βi = 1 while the kernel remains
+     unchanged due to normalization, e.g. β = ( 31 , 0, 23 ) ≡ ( 21 , 0, 1).
+   • Consequently, all possible β as a B-dimensional hypercube can be pro-
+     jected onto its (B − 1)-dimensional hypersurfaces. (see Figure 10)
+
+
+
+
+                                         7
+2.1.5   Growth Mapping
+The growth mapping G : [0, 1] → [−1, 1] is any unimodal, nonmonotonic func-
+tion with parameters µ, σ ∈ R (growth center and growth width) satisfying
+G(µ) = 1 (cf. ζ(·) in [23]) (Figure 3(f-g)):
+
+                             (u − µ)2
+                                    
+                 2 exp −                −1             exponential
+               
+               
+                                  2
+               
+               
+                              2σ
+                                           2
+                                                α
+                                      (u − µ)
+               
+               
+   G(u; µ, σ) = 2 1[µ±3σ] (u) 1 −                  − 1 polynomial, α = 4 (13)
+               
+                                       9σ 2
+                 2 1[µ±σ] (u) − 1                      rectangular
+               
+               
+               
+               
+               
+               . . .                                  or others
+
+2.1.6   GoL inside Lenia
+GoL can be considered a special case of discrete Lenia with R = T = P = 1,
+using a variant of the rectangular kernel core:
+                                                     1
+                       KC (r) = 1[ 41 , 34 ] (r) +     1 1 (r)            (14)
+                                                     2 [0, 4 )
+and the rectangular growth mapping with µ = 0.35, σ = 0.07.
+
+2.1.7   Summary
+In summary, discrete and continuous Lenia are defined as:
+
+               ADL = ∆x Z2 , ∆t Z, ∆p {0 . . . P }, B1 [0],
+                                                            1 
+                      At+∆t 7→ At + ∆t Gµ,σ (Kβ ∗ At ) 0
+                                
+                                                                          (15)
+                         2
+               ACL = R , R, [0, 1], B1 [0],
+                                                      1 
+                      At+dt 7→ At + dt Gµ,σ (Kβ ∗ At ) 0
+                                 
+                                                                          (16)
+
+    The associated dimensions are: space-time-state resolutions R, T, P , steps
+∆x, ∆t, ∆p, infinitesimals dx, dt, dp. The associated parameters are: growth
+center µ, growth width σ, kernel peaks β of rank B. The mutable core functions
+are: kernel core KC , growth mapping G.
+
+2.2     Computer Implementation
+Discrete Lenia (DL) can be implemented with the pseudocode below, assuming
+an array programming language is used (e.g. Python with NumPy, MATLAB,
+Wolfram).
+   Interactive programs have been written in JavaScript / HTML5, Python, and
+MATLAB to provide user interface for new species discovery (Figure 4(a-b)).
+Non-interactive program has been written in C#.NET for automatic traverse
+
+
+
+                                           8
+Figure 4: Computer implementations of Lenia with interactive user interfaces.
+(a-b) Web version run in Chrome browser (a) and Python version with GPU
+support (b). (c-f ) Different views during simulation, including the configuration
+At (c), the potential Ut (d), the growth Gt (e), and the actual change ∆A/∆t =
+(At+∆t − At )/∆t (f). (g) Other color schemes.
+
+
+through the parameter space using a flood fill algorithm (breath-first or depth-
+first search), providing species distribution, statistical data and occasionally
+new species.
+    State precision ∆p can be implicitly implemented as the precision of floating-
+point numbers. For values in the unit interval [0, 1], the precision ranges from
+2−126 to 2−23 (about 1.2 × 10−38 to 1.2 × 10−7 ) using 32-bit single-precision,
+or from 2−1022 to 2−52 (about 2.2 × 10−308 to 2.2 × 10−16 ) using 64-bit double-
+precision [33]. That means P > 1015 using double precision.
+    Discrete convolution can be calculated as the sum of element-wise products:
+                                      X
+                        K ∗ At (x) =      K(n)At (x + n)                      (17)
+                                     n∈N
+
+or alternatively, using discrete Fourier transform (DFT) according to the con-
+volution theorem:
+                        K ∗ At = F −1 F{K} · F {At }
+                                        
+                                                                          (18)
+    Efficient calculation can be achieved using fast Fourier transform (FFT)
+[34], pre-calculation of the kernel’s FFT F{K}, and parallel computing like
+GPU acceleration. The DFT/FFT approach automatically produces a periodic
+boundary condition.
+
+
+
+                                        9
+2.2.1   Pseudocode
+Symbol @ indicates two-dimensional matrix of floating-point numbers.
+function pre_calculate_kernel(beta, dx)
+  @radius = get_polar_radius_matrix(SIZE_X, SIZE_Y) * dx
+  @Br = size(beta) * @radius
+  @kernel_shell = beta[floor(@Br)] * kernel_core(@Br % 1)
+  @kernel = @kernel_shell / sum(@kernel_shell)
+  @kernel_FFT = FFT_2D(@kernel)
+  return @kernel, @kernel_FFT
+end
+
+function run_automaton(@world, @kernel, @kernel_FFT, mu, sigma, dt)
+  if size(@world) is small
+    @potential = elementwise_convolution(@kernel, @world)
+  else
+    @world_FFT = FFT_2D(@world)
+    @potential_FFT = elementwise_multiply(@kernel_FFT, @world_FFT)
+    @potential = FFT_shift(real_part(inverse_FFT_2D(@potential_FFT)))
+  end
+  @growth = growth_mapping(@potential, mu, sigma)
+  @new_world = clip(@world + dt * @growth, 0, 1)
+  return @new_world, @growth, @potential
+end
+
+function simulation()
+  R, T, mu, sigma, beta = get_parameters()
+  dx = 1/R; dt = 1/T; time = 0
+  @kernel, @kernel_FFT = pre_calculate_kernel(beta, dx)
+  @world = get_initial_configuration(SIZE_X, SIZE_Y)
+  repeat
+    @world, @growth, @potential = run_automaton(@world,
+        @kernel, @kernel_FFT, mu, sigma, dt)
+    time = time + dt
+    display(@world, @potential, @growth)
+  end
+end
+
+
+2.2.2   User Interface
+For implementations requiring an interactive user interface, one or more of the
+following components are recommended:
+
+   • Controls for starting and stopping CA simulation
+   • Panels for displaying different stages of CA calculation
+   • Controls for changing parameters and space-time-state resolutions
+   • Controls for randomizing, transforming and editing the configuration
+   • Controls for saving, loading, and copy-and-pasting configurations
+   • Clickable list for loading predefined patterns
+   • Utilities for capturing the display output (e.g. image, GIF, movie)
+   • Controls for customizing the layout (e.g. grid size, color map)
+   • Controls for auto-centering, auto-rotating and temporal sampling
+   • Panels or overlays for displaying real-time statistical analysis
+
+
+                                       10
+2.2.3   Pattern Storage
+A pattern can be stored for publication and sharing using a data exchange
+format (e.g. JSON, XML) that includes the run-length encoding (RLE) of the
+two-dimensional array At and its associated settings (R, T, P, µ, σ, β, KC , G),
+or alternatively, using a plaintext format (e.g. CSV) for further analysis or
+manipulation in numeric software.
+    A long list of interesting patterns can be saved as JSON/XML for program
+retrieval. To save storage space, patterns can be stored with space resolution
+R as small as possible (usually 10 ≤ R ≤ 20) thanks to Lenia’s scale invariance
+(see “Physics” section).
+
+2.2.4   Environment
+Most of computer simulations, experiments, statistical analysis, image and video
+capturing for this paper were done using the following environments and set-
+tings:
+
+   • Hardware: Apple MacBook Pro (OS X Yosemite), Lenovo ThinkPad X280
+     (Microsoft Windows 10 Pro)
+   • Software: Python 3.7.0, MathWorks MATLAB Home R2017b, Google
+     Chrome browser, Microsoft Excel 2016
+   • State precision: double precision
+   • Kernel core and growth mapping: exponential
+
+2.3     Evolving New Species
+A self-organizing, autonomous pattern in Lenia is called a lifeform, and a kind
+of similar lifeforms is called a species. Up to the moment, more than 400 species
+have been discovered. Interactive evolutionary computation (IEC) [35] is the
+major force behind the generation, mutation and selection of new species. In
+evolutionary computation (EC), the fitness function is usually well known and
+can be readily calculated. However, in the case of Lenia, due to the non-trivial
+task of pattern recognition, as well as aesthetic factors, evolution of new species
+often requires human interaction.
+    Interactive computer programs provide user interface and utilities for human
+users to carry out mutation and selection operators manually. Mutation oper-
+ators include parameter tweaking and configuration manipulation. Selection
+operators include observation via different views for fitness estimation (Figure
+3(c-f)) and storage of promising patterns. Selection criteria include survival,
+long-term stability, aesthetic appeal, and novelty.
+    Listed below are a few evolutionary strategies learnt from experimenting and
+practicing.
+
+
+
+
+                                        11
+Figure 5: Strategies of evolving new Lenia lifeforms using Interactive Evolution-
+ary Computation (IEC). (a) Random generation: random initial configuration
+is generated (top) and simulation is run (middle), where new lifeforms were spot-
+ted (arrow) and isolated (bottom). (b) Parameter tweaking: with an existing
+lifeform (top), parameters are adjusted so that new morphologies or behaviors
+are observed (middle, bottom). (c) Automatic exploration: a starting lifeform
+(top) is put into an automatic program to explore wide ranges of parameters
+(middle), where new lifeforms were occasionally discovered (arrow) and iso-
+lated (bottom). (d) Manual mutation: an existing lifeform (top) is modified,
+here single-side flipped (middle), and parameter tweaked to stabilize into a new
+species (bottom).
+
+
+2.3.1   Random Generation
+Initial configurations with random patches of non-zero sites were generated and
+put into simulation using interactive program. This is repeated using different
+random distributions and different parameters. Given enough time, naturally
+occurring lifeforms would emerge from the primordial soup, for example Orbium,
+Scutium, Paraptera, and radial symmetric patterns. (Figure 5(a))
+
+2.3.2   Parameter Tweaking
+Using an existing lifeform, parameters were changed progressively or abruptly,
+forcing the lifeform to die out (explode or evaporate) or survive by changing
+slightly or morphing into another species. Any undiscovered species with novel
+structure or behavior were recorded. (Figure 5(b))
+    Transient patterns captured during random generation could also be stabi-
+lized into new species in this way.
+    Long-chain lifeforms (e.g. Pterifera) could first be elongated by temporary
+
+
+                                       12
+increasing the growth rate (decrease µ or increase σ), then stabilized into new
+species by reversing growth. Shortening could be done in the opposite manner.
+
+2.3.3   Automatic Exploration
+Starting from an existing lifeform, automatic program was used to traverse the
+parameter space (i.e. continuous parameter tweaking). All survived patterns
+were recorded, among them new species were occasionally found. Currently,
+automated exploration is ineffective without the aid of artificial intelligence
+(e.g. pattern recognition), and has only been used for simple conditions (rank
+1, mutation by parameter tweaking, selection by survival). (Figure 5(c))
+
+2.3.4   Manual Mutation
+Patterns were edited or manipulated (e.g. enlarging, shrinking, mirroring,
+single-side flipping, recombining) using our interactive program or other nu-
+meric software, and then parameter tweaked in attempt to stabilize into new
+species. (Figure 5(d))
+
+2.4     Analysis of Lifeforms
+2.4.1   Qualitative Analysis
+By using computer simulation and visualization and taking advantage of hu-
+man’s innate ability of spatial and temporal pattern recognition, the physical
+appearances and movements of known species were being observed, documented
+and categorized, as reported in the “Morphology” and “Behavior” sections. Us-
+ing automatic traverse program, the distributions of selected species in the pa-
+rameter space were charted, as reported in the “Ecology” section. A set of
+criteria, based on the observed similarities and differences among the known
+species, were devised to categorize them into a hierarchical taxonomy, as re-
+ported in the “Taxonomy” section.
+
+2.4.2   Quantitative Analysis
+Statistical methods were used to analyze lifeforms to compensate the limita-
+tions in human observation regarding subtle variations and long-term trends. A
+number of statistical measures were calculated over the configuration (i.e. mass
+distribution) A and the positive-growth distribution G|G>0 :
+
+    • Mass is the sum of states, m = A(x)dx [mg] R
+                                       R
+
+    • Volume is the number of positive states, Vm = A>0 dx [mm2 ]
+    • Density is the overall density of states, ρm R= m/Vm [mg mm−2 ]
+    • Growth is the sum of positive growth, g = G>0 G(x)dx [mg s−1 ]
+    • Centroid is the center of states, x̄m = xA(x)dx/m R
+                                              R
+
+    • Growth center is the center of positive growth, x̄g = G>0 xG(x)dx/g
+
+
+
+                                      13
+   • Growth-centroid distance is the distance between the two centers,
+     dgm = |x̄g − x̄m | [mm]
+   • Linear speed is the linear moving rate of the centroid,
+     sm = |dx̄m /dt| [mm s−1 ]
+   • Angular speed is the angular moving rate of the centroid,
+     ωm = d/dt arg(dx̄m /dt) [rad s−1 ]
+   • Mass asymmetry
+           R             is the
+                              R mass difference across the directional vector,
+     m∆ = c>0 A(x)dx − c<0 A(x)dx [mg] where c = dx̄m × (x − x̄m )
+   • Angular
+          R mass is the second moment of mass from the centroid,
+     Im = A(x)(x − x̄m )2 dx [mg mm2 ]
+   • Gyradius
+          p is the root-mean-square of site distances from the centroid,
+     rm = Im /m [mm]
+   • Others e.g. Hu’s and Flusser’s moment invariants φi [36, 37]
+
+    Note: Brackets indicate the units of measure borrowed from SI units in
+microscopic scale, e.g. “mm” for length, “rad” for angle, “s” for time, “mg” for
+states (cf. “lu” and “tu” in [4]).
+    Based on the multivariate time-series of statistical measures, the following
+“meta-measures” could be calculated:
+
+   • Summary statistics (mean, median, standard deviation, minimum, maxi-
+     mum, quartiles)
+   • Quasi-period (estimated using e.g. autocorrelation, periodogram)
+   • Degree of chaos (e.g. Lyapunov exponent, attractor dimension)
+   • Probability of survival
+
+   The following charts were plotted using various parameters, measures and
+meta-measures:
+
+   • Time series chart (measure vs. time)
+   • Phase space trajectory (measure vs. measure) (e.g. Figure 17 insets)
+   • Allometric chart (meta vs. meta) (e.g. Figure 14, 16)
+   • Cross-sectional chart (meta vs. parameter) (e.g. Figure 17)
+   • µ-σ map (parameter µ vs. σ; information as color) (e.g. Figure 9, 15)
+   • β-cube (parameter β components as axes; information as color) (e.g. Fig-
+     ure 10)
+
+    Over 1.2 billion measures were collected using automatic traverse program
+and analyzed using numeric software like Microsoft Excel. Results are presented
+in the “Physiology” section.
+
+2.4.3   Spatiotemporal Analysis
+Constant motions like translation, rotation and oscillation render visual anal-
+ysis difficult. It is desirable to separate the spatial and temporal aspects of a
+moving pattern so as to directly assess the static form and estimate the motion
+frequencies (or quasi-periods).
+
+
+                                       14
+    Linear motion can be removed by auto-centering, to display the pattern
+centered at its centroid x̄m .
+    Using temporal sampling, the simulation is displayed one frame per N time-
+steps. When any rotation is perceived as near stationary due to the stroboscopic
+effect, the rotation frequency is approximately the sampling frequency fr ≈ fs =
+1/(N ∆t). Calculate the sampled angular speed ωs = θfr = 2πfr /n where n
+is the number of radial symmetric axes. Angular motion can be removed by
+auto-rotation, to display the pattern rotated by −ωs t.
+    With the non-translating, non-rotating pattern, any global or local oscilla-
+tion frequency can be determined as fo ≈ fs again using temporal sampling.
+
+
+3       RESULTS
+Results of the study of Lenia will be outlined in various sections: Physics,
+Taxonomy, Ecology, Morphology, Behavior, Physiology, and Case Study.
+
+3.1     Physics
+We present general results regarding the effects of basic CA settings, akin to
+physics where one studies how the space-time fabric and fundamental laws in-
+fluence matter and energy.
+
+3.1.1    Spatial Invariance
+For sufficiently fine space resolution (R > 12), patterns in Lenia are minimally
+affected by spatial similarity transformations including shift, rotation, reflection
+and scaling (Figure 6(d-g)). Shift invariance is shared by all homogenous CAs;
+reflection invariance is enabled by symmetries in neighborhood and local rule;
+scale invariance is enabled by large neighborhoods (as in LtL [25]); rotation
+invariance is enabled by circular neighborhoods and totalistic or polar local rules
+(as in SmoothLife [27] and Lenia). Our empirical data of near constant metrics
+of Orbium over various space resolutions R further supports scale invariance in
+Lenia (Figure 7(a-b)).
+
+3.1.2    Temporal Asymptosy
+The local rule φ of discrete Lenia (DL) can be considered the Euler method
+An+1 = An + hf (An ) for solving the local rule φ of continuous Lenia (CL)
+rewritten as an ordinary differential equation (ODE):
+                                               (1−At )/dt
+                     At+dt = At + dt G(K ∗ At ) −At /dt
+                                    
+                                                                               (19)
+                      d t             (1−A )/dtt
+                         A = G(K ∗ At ) −At /dt                                (20)
+                      dt
+    The Euler method should better approximate the ODE as step size h dimin-
+ishes, similarly DL should approach its continuum limit CL as ∆t decreases.
+
+
+                                        15
+Figure 6: Plasticity of Orbium (µ = 0.15, σ = 0.016) under various environment
+settings and transformations. (Scale bar is unit length = kernel radius, same in
+all panels). (a) Original settings: R = 185, T = 10, P > 1015 (double precision),
+exponential core functions. (b-c) Core functions changed to polynomial with
+no visible effect (b), to rectangular produces rougher pattern (c). (d-e) Pattern
+flipped horizontally (d) or rotated 77°anti-clockwise (e) with no visible effect.
+(f-g) Pattern downsampled with space compressed to R = 15 (f: zoomed in,
+inset: actual size), under recovery after upsampled using nearest-neighbor and
+space resolution restored to R = 185 (g), eventually recovers to (a). (h-i) Time
+compressed to T = 5 produces rougher pattern (h); time dilated to T = 320
+produces smoother, lower density pattern (i). (j) Fewer states P = 10 produces
+rougher pattern.
+
+
+This is supported by empirical data of asymptotic metrics of Orbium over in-
+creasing time resolutions T (Figure 7(c-d)) towards an imaginable “true Or-
+bium” (Figure 6(i)).
+
+3.1.3   Core Functions
+Choices of kernel core KC and growth mapping G (the core functions or “fun-
+damental laws”) usually alter the “textures” of a pattern but not its overall
+structure and dynamics (Figure 6(b-c)). Smoother core functions (e.g. expo-
+nential) produce smoother patterns, rougher ones (e.g. rectangular) produce
+rougher patterns. This plasticity suggests that similar lifeforms should exist in
+SmoothLife which resembles Lenia with rectangular core functions, as supported
+by similar creatures found in both CAs (Figure 1(f-g)).
+
+3.2     Taxonomy
+We present the classification of Lenia lifeforms into a hierarchical taxonomy, a
+process comparable to the biological classification of Terrestrial life [38].
+
+
+
+
+                                       16
+Figure 7: Effects of space-time resolutions as experimented with Orbium (µ =
+0.15, σ = 0.016). Each data point in (a) and (c) is averaged across 300 time-
+steps. (a-b) Spatial invariance: for a range of space resolution R ∈ {9 . . . 55}
+and fixed time resolution T=10, all statistical measures (mass m, growth g,
+gyradius rm , growth-centroid distance dgm , linear speed sm ) remain constant
+(a) and the parameter range (“niche”) remain static (total 557 loci) (b). (c-
+d) Temporal asymptosy: for a range of time resolution T ∈ {4 . . . 2560} and
+fixed space resolution R=13, structure-related measures (m, rm ) go down and
+dynamics-related measures (g, dgm , sm ) go up, reaching each continuum limit
+asymptically (c); the parameter range expands as time dilates (dark to light
+enclosures, total 14,182 loci) (d).
+
+
+3.2.1     Phylogeny of the Glider
+The most famous moving pattern in GoL is the diagonally-moving “glider”
+(Figure 1(a)). It was not until LtL [30] that scalable digital creatures were
+discovered including the glider analogue “bugs with stomach”, and SmoothLife
+[27] was the first to produce an omni-directional bug called the “smooth glider”,
+which was rediscovered in Lenia as Scutium plus variants (Figure 1(e-g) left).
+We propose the phylogeny of the glider:
+        Glider → Bug with stomach → Smooth glider → Scutium
+Phylogenies of other creatures are possible, like the “wobbly glider” and Pyros-
+cutium (Figure 1(f-g) right).
+
+
+
+
+                                       17
+Figure 8: Biodiversity in Lenia as exemplified by the 18 Lenia families (not to
+scale). (Column 1) (O) Orbidae, (S) Scutidae, (P) Pterifera, (H) Helicidae, (K)
+Kronidae, (Ct) Ctenidae; (Column 2) (C) Circidae, (D) Dentidae, (L) Lapillidae,
+(Q) Quadridae, (V) Volvidae; (Column 3) (B) Bullidae, (R) Radiidae, (F) Foli-
+dae, (G) Geminidae, (U) Uridae; (Column 4) (K) Kronidae, (E) Echinidae, (A)
+Amoebidae.
+
+
+3.2.2   Classification
+Principally there are infinitely many types of lifeforms in Lenia, but a range of
+visually and statistically similar lifeforms were grouped into a species, defined
+such that one instance can be morphed smoothly into another by continuously
+adjusting parameters or other settings. Species were further grouped into higher
+taxonomic ranks — genera, families, orders, classes — with decreasing simi-
+larity and increasing generality, finally subsumed into phylum Lenia, kingdom
+Automata, domain Simulata, and the root Artificialia. Potentially other kinds of
+artificial life can be incorporated into this Artificialia tree.
+    Below are the current definitions of the taxonomic ranks.
+
+
+                                       18
+   • A species is a group of lifeforms with the same morphology and behavior
+     in global and local scales, form a cluster (niche) in the parameter space,
+     and follow the same statistical trends in the phase space (Figure 9, 14).
+     Continuous morphing among members is possible.
+   • A genus is a group of species with the same global morphology and be-
+     havior but differ locally, occupy adjacent niches, and have discontinuity in
+     statistical trends. Abrupt but reversible transformation among member
+     species is possible.
+   • A subfamily is a series of genera with increasing number of “units” or
+     “vacuoles”, occupy parallel niches of similar shapes.
+   • A family is a collection of subfamilies with the same architecture or body
+     plan, composed of the same set of components arranged in similar ways.
+   • An order is a rough grouping of families with similar architectures and
+     statistical qualities, e.g. speed.
+   • A class is a high-level grouping of how lifeforms influenced by the arrange-
+     ment of kernel.
+
+3.2.3   Tree of Artificial Life
+The notion of “life”, here interpreted as self-organizing autonomous entities in
+a broader sense, may include biological life, artificial life, and other possibilities
+like extraterrestrial life. Based on lifeforms from Lenia and other systems, we
+propose the tree of artificial life:
+
+Artificialia
+    Domain Synthetica          “Wet” biochemical synthetic life
+    Domain Mechanica           “Hard” mechanical or robotic life, e.g. [39]
+    Domain Simulata            “Soft” computer simulated life
+         Kingdom Sims          Evolved virtual creatures, e.g. [7, 8, 9]
+         Kingdom Greges        Particle swarm solitons, e.g. [3, 29, 40, 41]
+         Kingdom Turing        Reaction-diffusion solitons, e.g. [4, 28, 42]
+         Kingdom Automata      Cellular automata solitons
+             Phylum Discreta   Non-scalable, e.g. [20, 21, 43]
+             Phylum Lenia      Scalable, e.g. [25, 27]
+
+   The current taxonomy of Lenia (Figure 8):
+
+Phylum Lenia
+   Class Exokernel             having strong outer kernel rings
+      Order Orbiformes
+          Family Orbidae (O) “disk bugs”, disks with central stalk
+      Order Scutiformes
+          Family Scutidae (S) “shield bugs”, disks with thick front
+          Family Pterifera (P) “winged bugs”, one/two wings with sacs
+          Family Helicidae (H) “helix bugs”, rotating versions of P
+          Family Circidae (C) “circle bugs”, one or more concentric rings
+   Class Mesokernel            having kernel rings of similar heights
+      Order Echiniformes
+
+
+                                         19
+            Family Echinidae (E)
+                                 “spiny bugs”, throny or wavy species
+           Family Geminidae (G)
+                                 “twin bugs”, two or more compartments
+           Family Ctenidae (Ct)
+                                 “comb bugs”, P with narrow strips
+           Family Uridae (U) “tailed bugs”, with tails of various lengths
+    Class Endokernel             having strong inner kernel rings
+       Order Kroniformes
+           Family Kronidae (K) “crown bugs”, complex versions of S, P
+           Family Quadridae (Q)
+                                 “square bugs”, 4 × 4 grids of masses
+           Family Volvidae (V) “twisting bugs”, possibly complex H
+       Order Radiiformes
+           Family Dentidae (D) “gear bugs”, rotating with gear-like units
+           Family Radiidae (R) “radial bugs”, regular or star polygon shaped
+           Family Bullidae (B) “bubble bugs”, bilateral with bubbles inside
+           Family Lapillidae (L) “gem bugs”, radially distributed small rings
+           Family Folidae (F) “petal bugs”, stationary with petal-like units
+       Order Amoebiformes
+           Family Amoebidae (A)
+                                 “amoeba bugs”, volatile shape and behavior
+
+    Much like real-world biology, the taxonomy of Lenia is tentative and is sub-
+ject to revisions or redefinitions when more data is available.
+
+3.2.4    Naming
+Following Theo Jansen for naming artificial life using biological nomenclature
+(Animaris spp.) [39], each Lenia species was given a binomial name that de-
+scribes its geometric shape (genus name) and behavior (species name) to facil-
+itate analysis and communication. Alphanumeric code was given in the form
+“BGUs” with initials of genus or family name (G) and species name (s), number
+of units (U ), and rank (B ).
+    Suffix “-ium” in genus names is reminiscent of a bacterium or chemical
+elements, while suffixes “-inae” (subfamily), “-idae” (family), and “-iformes”
+(order) were borrowed from actual animal taxa. Numeric prefix 2 in genus
+names indicates the number of units, similar to organic compounds and elements
+(IUPAC names)
+
+3.3     Ecology
+We describe the parameter space of Lenia (“geography”) and the distribution
+of lifeforms (“ecology”).
+   2 Prefixes used are: Di-, Tri-, Tetra-, Penta-, Hexa-, Hepta-, Octa-, Nona-, Deca-, Undeca-
+
+, Dodeca-, Trideca-, etc.
+
+
+
+
+                                             20
+Figure 9: The µ-σ parameter space as µ-σ map, with niches of rank-1 species.
+Total 142,338 loci. (legend) Corresponding names and shapes for the species
+codes in the map. (inset) Wider µ-σ map showing the niche of Circium (grey
+region), demonstrates the four landscapes of rule space: class 1 homogenous
+desert (upper-left), class 2 cyclic savannah (central grey), class 3 chaotic forest
+(lower-right), class 4 complex river (central colored).
+
+
+3.3.1   Landscapes
+The four classes of CA rules [44, 17] corresponds to the four landscapes in the
+Lenia parameter space (Figure 9):
+
+   • Class 1 (homogenous “desert”) produces no global or local pattern but a
+     homogeneous (empty) state
+   • Class 2 (cyclic “savannah”) produces regional, periodic immobile patterns
+     (e.g. Circium)
+   • Class 3 (chaotic “forest”) produces chaotic, aperiodic global filament net-
+     work (“vegetation”)
+   • Class 4 (complex “river”) generates localized complex structures (life-
+     forms)
+
+3.3.2   Niches
+In the (B+1)-dimensional µ-σ-β parameter hyperspace, a lifeform only exists for
+a continuous parameter range called its niche. Each combination of parameters
+is called a locus (plural: loci).
+    For a given β, a µ-σ map is created by plotting the niches of selected lifeforms
+on a µ vs. σ chart. Maps of rank-1 species have been extensively charted and
+
+
+                                        21
+Figure 10: The β parameter space as β-cubes, with niches of selected species
+from the three Lenia classes. (a) β-cube of class Exokernel exemplified by Heli-
+cium, including rank-1 (right inset) niche at corner (1, 0, 0), rank-2 (left inset)
+niche at edge near ( 21 , 1, 0), rank-3 niche on surfaces near ( 12 , 12 , 1). (b) β-cube
+of class Mesokernel exemplified by Gyrogeminium gyrans (inset), niche around
+(1, 1, 1). (c) β-cube of class Endokernel exemplified by Decadentium rotans (in-
+set), niche mostly on surface (1, β2 , β3 ).
+
+
+were used in taxonomical analysis (Figure 9).
+    A β-cube is created by marking the existence (or the size of µ-σ niche) of
+a lifeform at every β locus. As noted in “Definition” section, a B-dimensional
+hypercube can be reduced to its (B − 1)-dimensional hypersurfaces, perfect for
+visualization in the three-dimensional case (Figure 10).
+
+3.4     Morphology
+We present the study of structural characteristics, or “morphology”, of Lenia
+lifeforms. See Figure 8 for the family codes (O, S, P, etc.).
+
+3.4.1    Architecture
+Lenia lifeforms possess morphological structures of various kinds, but they can
+be summarized into the following types of architectures:
+
+   • Segmented architecture is the serial combination of a few basic compo-
+     nents, prevalent in class Exokernel (O, S, P, H), also Ct, U, K.
+
+
+                                           22
+Figure 11: Anatomy and symmetries in Lenia lifeforms (not to scale). (a-c)
+Simple species as standalone components: Orbium as standalone orb (a); Gyror-
+bium as standalone orboid wing (b); Scutium as standalone scutum (c). (d-g)
+Complex species: radial Asterium rotans (d); roughly bilateral Hydrogeminium
+natans (e); long-chain Pentapteryx (f) and Pentakronium (g). (h) Symmetry of
+radial units: bilateral units in stationary Asterium inversus (left) and asymmet-
+ric units in rotational A. torquens (right). (i) Convexity: convex Nonapteryx
+arcus (top) and concave N. cavus (bottom). (j-l) Ornamentation: serration in
+higher-rank Scutium and Helicium (j); liquefaction in Heptageminium natans
+(k), also (e); caudation in Octacaudopteryx (l).
+
+
+
+
+                                       23
+   • Radial architecture is the radial arrangement of repeating units, common
+     in Radiiformes in class Endokernel (D, R, B, L, F), also C, E, V.
+   • Swarm architecture is the volatile cluster of granular masses, not confined
+     to a particular geometry or locomotion, as in G, Q, A.
+
+3.4.2   Components and Metamerism
+Segmented architecture is composed of the following inventory of components
+(class Exokernel only) (Figure 11(a-c, f)).
+
+   • The orb (disk) is a circular disk halved by a central stalk, found in O.
+   • The scutum (shield) is a disk with a thick front shield, found in S.
+   • The wing has two versions: the orboid (disk-like) wing is a distorted
+     orb with a budding mechanism that creates and destroys sacs repeat-
+     edly, found in concave S, P, H; the scutoid (shield-like) wing is a distorted
+     scutum, found in convex S, P, H.
+   • The vacuole (sac) is a disk between the wings of long-chain S, P, H.
+
+    Many of these components are possibly interrelated, e.g. the orboid wing
+and the orb, the scutoid wing and the scutum, as suggested by the similarity or
+smooth transitions between species.
+    Multiple components can be combined serially into long-chains through fu-
+sion or adhesion (e.g. Figure 8 (O:2) or (O:1)), in a fashion comparable to
+metamerism in biology (or multicellularity if we consider the components as
+“cells”) (Figure 11(f-g)).
+    Long-chain species exhibit different degrees of convexity, from convex to con-
+cave: S > convex P (arcus subgenus) > linear O > concave P (cavus subgenus);
+sinusoidal P (sinus subgenus) have hybrid convexity (Figure 11(i), 8 column 1).
+    Higher-rank segmented Ct, U, K also exhibit metamerism and convexity with
+more complicated components.
+
+3.4.3   Symmetry and Asymmetry
+Structural symmetry is a prominent characteristic of Lenia life, including the
+following types:
+
+   • Bilateral symmetry (dihedral group D1 ) mostly in segmented and swarm
+     architectures (O, S, P, Ct, U, K; G, Q).
+   • Radial symmetry (dihedral group Dn ) is geometrically rotational plus re-
+     flectional symmetry, caused by bilateral repeating units in radial architec-
+     ture (R, L, F, E).
+   • Rotational symmetry (cyclic group Cn ) is geometrically rotational with-
+     out reflectional symmetry, caused by asymmetric repeating units in radial
+     architecture (D, R, L) (Figure 11(h)).
+   • Spherical symmetry (orthogonal group O(2)) is a special case of radial
+     symmetry (C).
+   • Secondary symmetries:
+
+
+                                       24
+        – Spiral symmetry is secondary rotational symmetry derived from twisted
+          bilaterals (H, V).
+        – Biradial symmetry is secondary bilateral symmetry derived from ra-
+          dials (B, R, E).
+        – Deformed bilateral symmetry is bilateral with heavy asymmetry (e.g.
+          gyrating species in O, S, G, Q).
+   • No symmetry in amorphous species (A).
+
+    Asymmetry also plays a significant role in shaping the lifeforms and guiding
+their movements, causing various degrees of angular motions (detailed in “Phys-
+iology” section). Asymmetry is usually intrinsic in a species, as demonstrated by
+experiments where a slightly asymmetric form (e.g. Paraptera pedes, Echinium
+limus) was mirrored into perfect symmetry and remained metastable, but af-
+ter the slightest perturbation (e.g. rotate 1°), it slowly restores to its natural
+asymmetric form.
+
+3.4.4   Ornamentation
+Many detailed local patterns arise in higher-rank species owing to their complex
+kernels (Figure 11(d-e, j-l)):
+
+   • Decoration is the addition of tiny ornaments (e.g. dots, circles, crosses),
+     prevalent in class Endokernel.
+   • Serration is a ripple-like sinusoidal boundary or pattern, common in class
+     Exokernel and Mesokernel.
+   • Caudation is a tail-like structure behind a long-chain lifeform (e.g. P, K,
+     U), akin to “tag-along” in GoL.
+   • Liquefaction is the degradation of an otherwise regular structure into a
+     chaotic “liquified” tail.
+
+3.5     Behavior
+We present the study of behavioral dynamics of Lenia lifeforms, or “ethology”,
+in analogy to the study of animal behaviors in biology.
+
+3.5.1   Locomotion
+In GoL, pattern behaviors include stationary (fixed, oscillation), directional
+(orthogonal, diagonal, rarely oblique), and infinite growth (linear, sawtooth,
+quadratic) [21]. SmoothLife added omnidirectional movement to the list [27].
+Lenia supports a qualitatively different repertoire of behaviors, which can be
+described in global and local levels.
+    The global movements of lifeforms are summarized into modes of locomotion
+(Figure 12(a-c, e)):
+
+   • Stationarity (S) means the pattern stays still with negligible directional
+     movement or rotation.
+
+
+                                       25
+Figure 12: Behavioral dynamics in Lenia lifeforms. (not to scale; + = reference
+point; → = motion; 99K = time flow, left to right if unspecified) (a) Station-
+arity: inverting Trilapillium inversus (SO ). (b) Rotation: twinkling Hexaden-
+tium scintillans (RA ) (∗ = same unit). (c-d) Gyration: gyrating Gyrorbium
+gyrans (GO ) (c); zigzagging Vagorbium undulatus (GA ) (d). (e-i) Transloca-
+tion with various gaits: sliding Paraptera cavus labens (TF ) (e); jumping P. c.
+saliens (TO ) (f); walking P. c. pedes (TA ) (g); deflected P. sinus pedes (TDA )
+(h); chaotic P. s. p. rupturus (TCDA ) (i). (j) Spontaneous metamorphosis:
+Tetralapillium metamorpha switching among oscillating (SA ), rotating (RO ),
+frozen (SF ), walking (TA ), and wandering (TC ) (left to right), occasionally die
+out (×). (k) Particle reactions: two Orbium collide and fuse together into an
+intermediate, then stabilize into one Synorbium.
+
+
+
+                                       26
+   • Rotation (R) is the angular movement around a stationary centroid.
+   • Translocation (T) is the directional movement in certain direction.
+   • Gyration (G) is the angular movement around a non-centroid center, ba-
+     sically a combination of translocation and rotation.
+
+   In formula,
+                                       
+                                       
+                                        Stationarity:     s = 0, ω = 0
+                                       
+                                       Rotation:          s = 0, ω > 0
+          At+τ ≈ (Ssτ ◦ Rωτ )(At )                                             (21)
+                                       
+                                       
+                                        Translocation:    s > 0, ω = 0
+                                         Gyration:         s > 0, ω > 0
+                                       
+
+where τ is the quasi-period, S is a shift by distance sτ due to linear speed s, R
+is a rotation (around the centroid) by angle ωτ due to angular speed ω.
+
+3.5.2   Gaits
+The local details of movements are identified as different gaits (Figure 12(e-i)):
+
+   • Fixation (F ) means negligible or no fluctuation during locomotion.
+   • Oscillation (O ) is the periodic fluctuation during locomotion.
+   • Alternation (A ) is global oscillation plus out-of-phase local oscillations (see
+     “Physiology” section).
+   • Deviation (D ) is a small departure from the regular locomotion, e.g. slightly
+     curved linear movement, slight movements in the rotating or gyrating cen-
+     ter.
+   • Chaoticity (C ) is the chaotic, aperiodic movements.
+
+   Any gait or gait combination can be coupled with any locomotive mode,
+and is represented by the combined code (e.g. chaotic deviated alternating
+translocation = TCDA ). See Table 2 for all combinations.
+
+3.5.3   Metamorphosis
+Spontaneous metamorphosis is a highly chaotic behavior in Lenia, where a
+“shapeshifting” species frequently switch among different morphological-behavioral
+templates, forming a continuous-time Markov chain. Each template often re-
+sembles an existing species. The set of possible templates and the transition
+probabilities matrix are determined by the species and parameter values (Figure
+12(j)).
+    An extreme form of spontaneous metamorphosis is exhibited by the Amoe-
+bidae, where the structure and locomotive patterns are no longer recognizable,
+while a bounded size is still maintained.
+    These stochastic behaviors denied the previous assumption that morpholo-
+gies and behaviors are fixed qualities in a species, but are actually probabilistic
+(albeit usually single template with probability one).
+
+
+                                        27
+   Gait                             Locomotive mode (type of symmetry)
+   (type of         Stationarity     Rotation        Translocation      Gyration
+    asymmetry)      (Radial)         (Rotational)    (Bilateral)        (Deformed
+                                                                         bilateral)
+   Fixation         SF               RF              TF                 GF
+   (Static)         = Frozen         = Rotating      = Sliding          = Spinning
+                    Pentafolium      Asterium        Paraptera          Gyropteron
+                    lithos           rotans          cavus labens [e]   serratus velox
+   Oscillation      SO               RO              TO                 GO
+   (Dynamical)      = Ventilating    = Torqueing     = Jumping          = Gyrating
+                    Hexalapillium    Asterium        Paraptera          Gyrorbium
+                    ventilans        torquens        cavus saliens [f]  gyrans [c]
+   Alternation      SA               RA              TA                 GA
+   (Out-of-phase)   = Inverting      = Twinkling     = Walking          = Zigzagging
+                    Trilapillium     Hexadentium     Paraptera          Vagorbium
+                    inversus [a]     scintillans [b] cavus pedes [g]    undulatus [d]
+   Deviation        SD               RD              TD                 GD
+   (Unbalanced)     = Drifting       = Precessing    = Deflected        = Revolving
+                    Octafolium       Nivium          Paraptera          Gyrorbium
+                    tardus           incarceratus    sinus pedes [h]    revolvens
+   Chaoticity       SC               RC              TC                 GC
+   (Stochastic)     = Vibrating      = Tumbling      = Wandering        = Swirling
+                    Asterium         Decadentium     Paraptera          Gyrogeminium
+                    nausia           volubilis       s. p. rupturus [i] velox
+
+Table 2: Matrix of symmetries, asymmetries, locomotive modes, and gaits. Each
+combination is provided with a code, a descriptive term and a sample species.
+(Brackets indicate sub-figures in Figure 12)
+
+
+3.5.4   Infinite Growth
+Unlike the above behaviors where the total mass remains finite, there are be-
+haviors associated with infinite growth (positive or negative).
+    Explosion or evaporation is the uncontrolled infinite growth, where the mass
+quickly expands or shrinks in all directions, the lifeform fails to self-regulate and
+dies out.
+    Elongation or contraction is the controllable infinite growth, where a long-
+chain lifeform keeps lengthening or shortening in directions tangential to local
+segments. Microscopically, vacuoles are being constantly created or absorbed
+via binary fission or fusion.
+    As estimated by mass time-series, linear and circular elongation show linear
+growth rate, while spiral elongation (in Helicidae) and others show quadratic
+growth rate.
+
+3.5.5   Particle Reactions
+Using the interactive program as a “particle collider” (cf. [45]), we investigated
+the reactions among Orbidae instances acting as physical or chemical particles.
+They often exhibit elasticity and resilience during collision, engage in inelastic
+(sticky) collision, and seem to exert a kind of weak “attractive force” when two
+particles are nearby or “repulsive force” when getting too close.
+    Reaction of two or more Orbium particles with different starting positions
+and incident angles would result in one of the followings:
+
+
+
+                                           28
+   • Deflection, two Orbium disperse in different angles.
+   • Reflection, one Orbium unchanged and one goes in opposite direction.
+   • Absorption, only one Orbium survives.
+   • Annihilation, both Orbium evaporates.
+   • Detonation, the resultant mass explodes into infinite growth.
+   • Fusion, multiple Orbium fuse together into Synorbinae (Figure 12(k)).
+   • Parallelism, multiple Orbium travel in parallel with “forces” subtly bal-
+     anced, forming Parorbinae (Figure 8 (O:1)).
+
+   Starting from a composite Orbidae may result in:
+
+   • Fission, one Synorbinae breaks into multiple Synorbinae or Orbium.
+
+3.6     Physiology
+The exact mechanisms of morphogenesis (self-organization) and homeostasis
+(self-regulation), or “physiology”, in Lenia are not well understood. Here we
+will present a few observations and speculations.
+
+3.6.1   Symmetries and Behaviors
+A striking result in analyzing Lenia is the correlations between structural sym-
+metries/asymmetries (“Morphology” section) and behavioral dynamics (“Be-
+havior” section).
+    At a global scale, the locomotive modes (stationarity, rotation, transloca-
+tion, gyration) correspond to the types of overall symmetry (radial, rotational,
+bilateral, deformed bilateral). At a local scale, the locomotive gaits (fixation, os-
+cillation, alternation, deviation, chaoticity) correspond to the development and
+distribution of asymmetry (static, dynamic, out-of-phase among units, unevenly
+distributed, stochastic development) (Table 2).
+
+3.6.2   Stability-Motility Hypothesis
+A closer look in these symmetry-behavior correlations suggests the mechanisms
+of how motions arise.
+    In a bilateral species, while there is lateral (left-right) reflectional symmetry,
+the heavy asymmetry along the longitudinal (rostro-caudal) axis may be the
+origin of directional movement. In a deformed bilateral species, the lateral
+symmetry is broken, thus introduces an angular component to its linear motion.
+    In a radial species, bilateral repeating units are arranged radially, all direc-
+tional vectors cancel out, thus overall remain stationary. In a rotational species,
+asymmetric repeating units mean the lateral symmetry is broken, thus initiates
+angular rotation around the centroid.
+    On top of these global movements, the dynamical qualities of asymmetry —
+static/dynamical, in-phase/out-of-phase, balanced/unbalanced, regular/stochastic
+— lead to the dynamical qualities of locomotion (i.e. gaits).
+
+
+
+                                         29
+Figure 13: “Rotational clockwork” in selected alternating Dentidae species. Af-
+ter 1/n cycle, all phases advance by 1/n while phase relations remain unchanged.
+(not to scale; → = phase transfer; ( = same phase; = rotation, taken as the
+positive direction) (a) Even-sided Hexadentium scintillans, with opposite-phase
+adjacent units and same-phase alternating units. (b) Even-sided Dodecaden-
+tium scintillans, with sequentially out-of-phase adjacent units and same-phase
+opposite units. (c) Odd-sided Heptadentium scintillans, with globalized phase
+distribution.
+    Genus                   Rank   Units   Phase difference     Rotational symmetry
+    (species scintillans)   (B)     (n)     (k/n cycle) of    (m units = angle m · 2π/n)
+                                            adjacent units        between 1/n cycle
+    Hexadentium [a]          2       6           3/6              1 · 2π/6 (adjacent)
+    Heptadentium [c]         2       7           4/7              2 · 2π/7 (skipping)
+    Octadentium              2       8           4/8              1 · 2π/8 (adjacent)
+    Nonadentium              2       9           5/9              2 · 2π/9 (skipping)
+    Decadentium              4      10           2/10            1 · 2π/10 (adjacent)
+    Undecadentium            4      11           2/11            6 · 2π/11 (skipping)
+    Dodecadentium [b]        4      12           2/12            1 · 2π/12 (adjacent)
+    Tridecadentium           4      13           3/13            9 · 2π/13 (skipping)
+
+
+Table 3: Alternation characteristics (B, n, k, m) in selected alternating Dentidae
+species. (Brackets indicate sub-figures in Figure 13)
+
+
+   Based on these reasonings, we propose the stability-motility hypothesis (po-
+tentially applicable to real-world physiology or evolutionary biology):
+        Symmetry provides stability; asymmetry provides motility.
+
+        Distribution of asymmetry determines locomotive mode; its devel-
+        opment determines gait.
+
+3.6.3     Alternation and Internal Communication
+The alternation gait, that is global oscillation plus out-of-phase local oscillations,
+is one of the most complicated behavior in Lenia. It demonstrates phenomena
+like long-range synchronization and rotational clockwork.
+    Alternating translocation (TA ) in a simple bilateral species, where the two
+halves are in opposite phases, is the spatiotemporal reflectional (i.e. glide)
+
+
+                                            30
+symmetry at half-cycle, in addition to the full oscillation:
+                                         τ
+                                 At+ 2 ≈ (S sτ2 ◦ F )(At )                              (22)
+                                     t+τ                t
+                                 A           ≈ Ssτ (A )                                 (23)
+where τ is the quasi-period, S is a shift, F is a flip. (Figure 12(g))
+    Alternating long-chain species, where two wings are oscillating out-of-phase
+but the main chain remains static, demonstrates long-range synchronization in
+which faraway structures are able to synchronize.3
+    Alternating gyration (GA ) is a special case in Vagorbium (a variant of Gy-
+rorbium) where it gyrates to the opposite direction every second cycle, resulting
+in a zig-zag trajectory (Figure 12(d)).
+    Alternating stationarity (SA ) occurs in stationary radial lifeforms (with n
+repeating units), leads to spatiotemporal reflectional (or rotational) symmetry
+at half-cycle:
+                                     τ
+                               At+ 2 ≈ F (At ) ≈ R nπ (At )                             (24)
+                                 t+τ           t
+                               A         ≈A                                             (25)
+where R is a rotation. This gives an optical illusion of “inverting” motions
+(Figure 12(a)).
+   Alternating rotation (RA ) is an intricate phenomenon found in rotational
+species, especially family Dentidae. Consider a Dentidae species with n repeating
+units, two adjacent units are separated spatially by angle 2π/n and temporally
+by k/n cycle, k ∈ Z (Figure 13). After 1/n cycle, the pattern recreates itself
+with rotation due to angular speed ω, plus an extra spatiotemporal rotational
+symmetry of m units due to pattern alternation, m ∈ Z:
+                                         τ
+                                 At+ n ≈ R ωτ       t
+                                              2πm (A )
+                                           n + n
+                                                                                        (26)
+                                     t+τ                    t
+                                 A           ≈ Rωτ (A )                                 (27)
+This giving an illusion that local features (e.g. a hole) are transferring from
+one unit to another (Figure 13 outer arrows). The values of k, m seem to follow
+some particular trend (Table 3).
+
+3.6.4    Allometry
+Besides direct observation, Lenia patterns were studied through statistical mea-
+surement and analysis, akin to “allometry” in biology.
+    Various behaviors were found related to the average (mean or median), vari-
+ability (standard deviation or interquartile length) or phase space trajectory of
+various statistical measures (Table 4).
+    A few general trends were deduced from allometric charts, for example, linear
+speed is found to be roughly inverse proportional to density. From the linear
+speed sm vs. mass m chart (Figure 14), genera form strata according to linear
+speed (O>P>S>H>C), and species form clusters according to mass.
+   3 We performed experiments to show that alternation is self-recovering, meaning that it is
+
+not coincidental but actively maintained by the species.
+
+
+                                                   31
+Figure 14: Allometric chart of linear speed sm vs. mass m for rank-1 species.
+Total 142,338 loci, 300 time-steps (t = 30s) per locus. See Figure 9 legend for
+species codes.
+       Locomotion modes              Measure of           Measure of              Measure of
+       and gaits                   linear motion        angular motion             oscillation
+                                        (sm )         (|m∆ |, ωm , ωs , . . .)   (m, g, sm , . . .)
+       Stationarity                 Average ≈ 0          Average ≈ 0
+       Rotation                     Average ≈ 0          Average > 0 *
+       Translocation                Average > 0          Average ≈ 0
+       Gyration                     Average > 0          Average > 0
+       Fixation                                                                  Variability ≈ 0
+       Oscillation                                                               Variability > 0
+       Alternating translocation                       Variability > 0
+       Deviated translocation                           Average > 0 †
+       Chaoticity                                  ←− Chaotic trajectory −→
+
+Table 4: Allometric relationships between behavior and statistical measures.
+(* Only works in some cases; † Deviated translocation is similar to gyration)
+
+
+3.7     Case Study
+In previous sections, we outlined the general characterizations of Lenia from
+various perspectives. Here we combine these aspects in a focused study of
+one representative genus — Paraptera (P4) — as a demonstration of concrete
+qualitative and quantitative analysis.
+
+
+
+
+                                             32
+Figure 15: µ-σ map of the unit-4 group, showing the prominent Parorbium-
+Paraptera-Tetrascutium complex. Total 16,011 loci. The red dotted line marks
+the cross-sectional study (Figure 16).
+
+
+3.7.1   The Unit-4 Group
+Paraptera (P4) is closely related to two other genera Parorbium (O4) and
+Tetrascutium (S4), they comprise the rank-1 unit-4 group.
+    In the µ-σ map (Figure 15), their niches comprise the Parorbium-Paraptera-
+Tetrascutium (O4-P4-S4) complex. The narrow bridge between O4 and P4
+indicates possible continuous transformation, and the agreement between the
+small tip of P4 and S4 suggests a remote relationship. Species were isolated using
+allometric methods (Figure 16, Table 4), verified in simulation, and assigned new
+names (Table 5).
+
+3.7.2   Cross-Sectional Study
+In P4, a cross section at µ = 0.3 was further investigated, where five species
+exist in σ ∈ [0.0393, 0.0515] (Figure 15 red dotted line, Table 6). Their behav-
+ioral traits were assessed via cross-sectional charts and snapshot phase space
+trajectories (Figure 17, see also Figure 12(e-i)).
+    At higher σ values, Paraptera arcus saliens (P4as) has high m variability
+and near zero m∆ , corresponding to their jumping behavior and perfect bilateral
+
+
+
+                                       33
+   Species                         Morphology                              Behavior
+   O4    genus Parorbium (family Orbidae)
+         O4d     Po. dividuus      Two parallel orbs, separated            T = translocating
+         O4a     Po. adhaerens     Two parallel orbs, adhered              T
+   P4    genus Paraptera (family Pterifera)
+         P4o*    P. orbis *        Concave, twin orboid wings              T
+         P4c*    P. cavus *        Concave, twin orboid wings              T
+         P4a*    P. arcus *        Convex, twin scutoid wings              T
+         P4s*    P. sinus *        Sinusoidal, orboid + scutoid wings      TD* = deflected
+         P4*l    P. * labens       Bilateral                               TF = sliding
+         P4*s    P. * saliens      Bilateral                               TO = jumping
+         P4*p    P. * pedes        Bilateral with slight asymmetry         TA = walking
+         P4*v    P. * valvatus     Scutidae-like, twin wings, valving      TO = valving
+         P4**f   P. * * furiosus   Occasional stretched wing               TC* = chaotic
+   S4    genus Tetrascutium (family Scutidae)
+         S4s     T. solidus        Four fused scuta, solid                 TF = sliding
+         S4v     T. valvatus       Four fused scuta, valving               TO = valving
+
+Table 5: Non-exhausive list of species identified in the unit-4 group. (* = Com-
+binations are possible, e.g. P4spf with behavior TCDA )
+
+
+
+
+Figure 16: Allometric charts of various measures for the unit-4 family. Total
+16,011 loci, 300 time-steps (t = 30s) per locus. (a) Linear speed sm vs. mass m,
+similar to the µ-σ map flipped. (b) Mass variability s(m) vs. mass m, isolates
+jumping (TO ) species P4cs and P4as. (c) Angular speed variability s(ωm ) vs.
+mass m, isolates walking (TA ) species P4cp and P4ap.
+
+
+
+      Species                       σ range            Morphology and behavior
+      P4as      P. arcus saliens    [0.0468, 0.0515]   Convex, jumping (TO )
+      P4cp      P. cavus pedes      [0.0412, 0.0483]   Concave, walking (TA )
+      P4sp      P. sinus pedes      [0.0404, 0.0414]   Sinusoidal, deflected walking (TDA )
+      P4spf     P. s. p. furiosus   [0.0400, 0.0403]   As above plus chaotic (TCDA )
+      P4spr     P. s. p. rupturus   [0.0393, 0.0399]   As above plus fragile
+
+         Table 6: List of Paraptera species in the cross-section µ = 0.3.
+
+
+
+                                               34
+                                      (a)
+
+
+
+
+                                      (b)
+
+Figure 17: Cross-sectional charts at µ = 0.3, σ ∈ [0.0393, 0.0515] in genus Para-
+ptera. 200 time-steps (t = 20s) per locus (See Table 6 for species codes). (a)
+Mass m vs. parameter σ, insets: growth g vs. mass m phase space trajectories
+at loci a-i. (b) Mass asymmetry m∆ vs. parameter σ, insets: linear speed sm
+vs. angular speed ωm phase space trajectories at loci a-i.
+
+
+
+
+                                       35
+symmetry (locus a). P. cavus pedes (P4cp) has high m∆ variability, matching
+their walking behavior and alternating asymmetry (locus d).
+    Just outside the coexistence of P4as and P4cp over σ ∈ [0.0468, 0.0483], they
+slowly transform into each other, as shown by the spiral phase space trajectories
+(loci b, c). Similarly for P4cp and P4sp (locus f).
+    Irregularity and chaos arise at lower σ. For P. sinus pedes (P4sp), non-zero
+m∆ indicates deflected movement and asymmetry (locus g). For P. sinus pedes
+furiosus (P4spf), chaotic phase space trajectory indicates to chaotic movement
+and deformation (locus h).
+    At the edge of chaoticity, P. sinus pedes rupturus (P4spr) has even higher and
+rugged variability, often encounters episodes of acute deformation but eventually
+recovers (locus i). Outside the σ lower bound, the pattern fails to recover and
+finally disintegrates.
+
+
+4       DISCUSSION
+4.1     Geometric Cellular Automata
+Standard CAs like GoL and ECA consider only the nearest sites as neighbor-
+hood, yet more recent variants like LtL, SmoothLife and dsicrete Lenia have
+extended neighborhoods that enable the control over the “granularity” of space.
+The latter ones are still technically discrete, but are approximating another
+class of continuous systems called Euclidean automata (EA) [26]. We call them
+geometric cellular automata (GCA). GCAs and standard CAs are fundamen-
+tally different in a number of contrasting qualities (Table 7). LtL is somehow
+in-between, having qualities from both sides (see Table 1).
+    Additionally, in standard CAs, most of the interesting patterns are con-
+centrated in specific rules like GoL, but GCAs patterns are scattered over the
+parameter space. Also, the “digital” vs. “analog” distinction goes beyond a
+metaphor, in that many of the standard CAs are capable of “digital” universal
+computation, while whether certain kind of “analog computing” is possible in
+GCAs remains to be seen.
+    As GCAs being approximants of EAs, these contrasting qualities may well
+exist between the truly continuous EAs and discrete CAs.
+
+4.2     Nature of Lenia
+Here we deep dive into the very nature of Lenia patterns, regarding their un-
+predictability, fuzziness, quasi-periodicity, resilience, and lifelikeness, at times
+using GoL for contrast.
+
+4.2.1    Persistence
+GoL patterns are either persistent, guaranteed to follow the same dynamics
+every time, or temporary, eventually stabilize as persistent patterns or vanish.
+Lenia patterns, on the other hand, have various types of persistence:
+
+
+                                        36
+          Standard CA patterns                    Geometric CA patterns
+            (e.g. GoL, ECA)                      (e.g. SmoothLife, Lenia)
+                                    Structure
+                “Digital”                             “Analog”
+              Non-scalable                             Scalable
+               Quantized                               Smooth
+             Localized motifs                     Geometric manifolds
+            Complex circuitry                    Complex combinatorics
+                                   Dynamics
+              Deterministic                          Unpredictable
+                  Precise                               Fuzzy
+             Strictly periodic                       Quasi-periodic
+               Machine-like                            Life-like
+                                   Sensitivity
+                  Fragile                               Resilient
+            Mutation sensitive                     Mutation tolerant
+               Rule-specific                          Rule-generic
+           Rule change sensitive                  Rule change adaptive
+
+        Table 7: Contrasting qualities in standard and geometric CAs.
+
+
+  1. Transient: only last for a short period.
+  2. Quasi-stable: able to sustain for a few to hundreds of cycles.
+  3. Stable: survive as long as simulations went, possibly forever.
+  4. Metastable: stable but transform into another pattern after slight pertur-
+     bations.
+  5. Chaotic: “walk a thin line” between chaos and self-destruction.
+  6. Markovian: shapeshift among templates, each has its own type of persis-
+     tence.
+
+    Given a pattern, it is unpredictable whether it belongs to which persistent
+type unless we put it into simulation for a considerable (potentially infinite)
+amount of time, a situation akin to the halting problem and the undecidability
+in class 4 CAs [46]. This uncertainty results in the vague boundaries of niches
+(see Figure 15).
+    Even for a stable persistent pattern, in contrast to the GoL “glider” that
+will forever move diagonally, we can never be 100% sure that an Orbium will
+not eventually die out.
+
+4.2.2   Fuzziness
+No two patterns in Lenia are the same; there are various kinds of fuzziness
+and subtle varieties. Within a species, slightly different parameter values, rule
+settings, or initial configurations would result in slightly different patterns (see
+Figure 6). Even during a pattern’s lifetime, no two cycles are the same.
+    Consider the phase space trajectories of recurrent patterns (Figure 18), every
+trajectory corresponds to an attractor (or a strange attractor if chaotic). Yet,
+
+
+                                        37
+Figure 18: Phase space trajectories of growth g vs. mass m (same cross-section
+as Figure 17); trajectories separated by ∆σ = 0.0001, each over a period of t =
+20s. Each trajectory corresponds to an attractor, a group of similar trajectories
+hints a species-level “attractor”.
+
+
+behind a group of similar patterns, there seems to be another kind of “attractor”
+that draws them into a common morphological-behavioral template.
+    Essentialism in western philosophy proposes that every entity in the world
+can be identified by a set of intrinsic features or an “essence”, be it an ideal
+form (Plato’s idealism) or a natural kind (Aristotle’s hylomorphism). In Lenia,
+is there a certain kind of “Orbium-ness” inside all instances and occurrences of
+Orbium? Could this be identified or utilized objectively and quantitatively?
+
+4.2.3   Quasi-Periodicity
+Unlike GoL where a recurrent pattern returns to the exact same pattern after
+an exact period of time, a recurrent pattern in Lenia returns to similar patterns
+after slightly irregular periods or quasi-periods, probably normally distributed.
+Lenia has various types of periodicity:
+
+  1. Aperiodic: in transient non-recurrent patterns.
+  2. Quasi-periodic: in quasi-stable, stable or metastable patterns.
+  3. Chaotic: with wide-spread quasi-period distribution.
+  4. Markovian: each template has its own type of periodicity.
+
+   Principally, in discrete Lenia, there are finite, albeit astronomically large,
+number of possible configurations |S L |. Given enough time, a recurrent pattern
+would eventually return to the exact same configuration (strictly periodic), an
+argument not unlike Nietzsche’s “eternal recurrence”, although there would be
+numerous approximate recurrences between two exact recurrences. In continu-
+ous Lenia, exact recurrence may even be impossible.
+
+
+
+                                       38
+Figure 19: Different views of calculation intermediates. Configuration At (a),
+potential distribution Ut (b), and kernel K (c). Notice one larger and six smaller
+potential peaks (b: dark spots) possibly formed by kernel resonance, and the
+corresponding inner spaces (a: white areas).
+
+
+4.2.4   Plasticity
+Given the fuzziness and irregularity, Lenia patterns are surprisingly resilient and
+exhibit phenotypic plasticity. By elastically adjusting morphology and behavior,
+they are able to absorb deformations and transformations, adapt to environmen-
+tal changes (parameters and rule settings), react to head-to-head collisions, and
+continue to survive.
+    We propose a speculative mechanism for the plasticity (also self-organization
+and self-regulation in general) as the kernel resonance hypothesis (Figure 19).
+A network of potential peaks can be observed in the potential distribution. The
+peaks are formed by the overlapping or “resonance” of kernel rings casted by
+various mass lumps, in turn, the locations of the mass lumps are determined by
+the network of peaks. In this way, the mass lumps influence each other recipro-
+cally and self-organize into structures, providing the basis of morphogenesis.
+    Kernel resonance is dynamic over time, and may even be self-regulating,
+providing the basis of homeostasis. Plasticity may stem from the static buffering
+and dynamical flexibility provided by such mass-potential-mass feedback loop.
+
+4.2.5   Computability
+GoL, ECA rule 110, and LtL have been demonstrated to be capable of univer-
+sal computation [22, 43, 47]. The proof of Turing universality of a CA requires
+searching for “glider gun” patterns that periodically emit “gliders” (i.e. small
+moving solitons), designing precise circuits orchestrated by glider collisions, and
+assembling them into logic gates, memory registers, eventually Turing machines
+[48]. However, this may be difficult in Lenia due to the imprecise nature of pat-
+tern movements and collisions, and the lack of pattern-emitting configurations.
+    That said, particle collisions in Lenia, especially among Orbium instances,
+worth further experimentation and analysis. These have been done for classical
+CAs (GoL and ECA rule 100) qualitatively [45] and quantitatively using e.g.
+algorithmic information dynamics [49].
+
+
+                                        39
+Figure 20: Appearance similarities between Earth and Lenia life. (a) Bilateral
+trilobite Bohemoharpes ungula [51, plate 47] and Lenian Orbium bicaudatus. (b)
+Trimerous diatom Triceratium moronense [51, plate 4] and Lenian Trilapillium
+inversus. (c) Pentamerous larva of sea star Asterias species [51, plate 40] and
+Lenian Asterium inversus. (d) Weakly bilateral mitochondrion [52] and Lenian
+Hydrogeminium natans, with matrix-like internal structures.
+
+
+4.3     Connections with Biological Life
+Besides the superficial resemblance, Lenia life may have deeper connections to
+biological life.
+
+4.3.1   Symmetry and Locomotion
+Both Lenia and Earth life exhibit structural symmetry and similar symmetry-
+locomotion relationships (Figure 20(b-c)).
+    Radial symmetry is universal in Lenia order Radiiformes. In biological life,
+radial symmetry is exhibited in microscopic protists (diatoms, radiolarians) and
+primitive animals historically grouped as Radiata (jellyfish, corals, comb jel-
+lies, echinoderm adults). These radiates are sessile, floating or slow-moving,
+similarly, Lenia radiates are usually stationary or rotating with little linear
+movement.
+    Bilateral symmetry is the most common in Lenia. In biological life, the
+group Bilateria (vertebrates, arthropods, mollusks, various “worm” phyla) with
+the same symmetry are the most successful branch of animals since the rapid
+diversification and proliferation near the Cambrian explosion 542 million years
+ago [50]. These bilaterians are optimized for efficient locomotion, and similarly,
+Lenia bilaterians engage in fast linear movements.
+
+4.3.2   Adaptation to Environment
+The parameter space of Lenia, earlier visualized as a geographical landscape
+(“Ecology” section), can also be thought of as an adaptive landscape. Species
+
+
+                                       40
+niches correspond to fitness peaks, indicate successful adaptation to the ranges
+of parameters.
+    Any body plan (corresponds to Earth animal phylum or Lenia family) would
+be considered highly adaptive if it has high biodiversity, wide ecological distri-
+bution, or great complexity. On Earth, the champions are the insects (in terms
+of biodiversity), the nematodes (in terms of ecosystem breadth and individual
+count), and the mammals (producing intelligent species like cetaceans and pri-
+mates). In Lenia, family Pterifera is the most successful in class Exokernel in
+terms of diversity, niche area, and complexity.
+    The parallels between two systems regarding adaptability may provide in-
+sights in evolutionary biology and evolutionary computation.
+
+4.3.3   Species Problem
+One common difficulty encountered in the studies of Earth and Lenia life is the
+precise definition of a “species”, or the species problem. In evolutionary biology,
+there exist several species concepts [53]:
+
+   • Morphological species: based on phenotypic differentiation [54]
+   • Phenetic species: based on numerical clustering (cf. phenetics) [55]
+   • Genetic species: based on genotypic clustering [56]
+   • Biological species: based on reproductive isolation [57]
+   • Evolutionary species: based on phylogenetic lineage divergence [58, 59]
+   • Ecological species: based on niche isolation [60]
+
+    Similar concepts are used in combination for species identification in Lenia,
+including morphological (similar morphology and behavior), phenetic (statisti-
+cal cluster) and ecological (niche cluster) species. However, species concepts face
+problems in some situations, for example, in Earth’s case, species aggregates or
+convergent evolution, and in Lenia’s case, niche complex or shapeshifting life-
+forms. It remains an open question whether clustering into species and grouping
+into higher taxa can be carried out objectively and systematically.
+
+4.4     Future Works
+4.4.1   Open Questions
+Here are a few open questions we hope to answer:
+
+  1. What are the enabling factors and mechanisms of how self-organization,
+     self-regulation, self-direction, adaptability, etc. emerge in Lenia?
+  2. How do interesting phenomena like symmetry, alternation, metamerism,
+     metamorphosis, particle collision, etc. arise in Lenia?
+  3. How is Lenia related to biological life and other forms of artificial life?
+  4. Can Lenia life be classified objectively and systematically?
+  5. Does continuous Lenia exist as the continuum limit of discrete Lenia? If
+     so, do corresponding “ideal” lifeforms exist there?
+
+
+                                        41
+  6. Is Lenia Tuning-complete and capable of universal computation?
+  7. Is Lenia capable of open-ended evolution that generates unlimited novelty
+     and complexity?
+  8. Do self-replicating and pattern-emitting lifeforms exist in Lenia?
+  9. Do lifeforms exist in other variants of Lenia (e.g. 3D)?
+
+   To answer these questions, the following approaches of future works are
+suggested.
+
+4.4.2   More Species Data
+For the sheer joy of discovering new species, and for further understanding
+Lenia and artificial life, we need better capabilities in species discovery and
+identification.
+    Automatic and accurate species identification could be achieved via com-
+puter vision and pattern recognition using machine learning or deep learning
+techniques, e.g. training convolutional neural networks (CNNs) with patterns,
+or recurrent neural networks (RNNs) with time-series of measures.
+    Interactive evolutionary computation (IEC) currently in use for new species
+discovery could be advanced to allow crowdsourcing. Web or mobile applications
+with intuitive interface would allow online users to simulate, mutate, select
+and share interesting patterns (cf. Picbreeder [61], Ganbreeder [62]). Web
+performance and functionality could be improved using WebAssembly, OpenGL,
+TensorFlow.js, etc.
+    Alternatively, evolutionary computation (EC) and similar methodologies
+could be used for automatic, efficient exploration of the search space, as has
+been successfully used for evolving new body parts or body plans [9, 39, 63].
+Patterns could be represented in genetic (indirect) encoding using Composi-
+tional Pattern-Producing Network (CPPN) [64] or Bezier splines [65], which
+are then evolved using genetic algorithms like NeuroEvolution of Augmenting
+Topologies (NEAT) [66]. Novelty-driven and curiosity-driven algorithms are
+promising approaches [67, 68, 69].
+
+4.4.3   Better Data Analysis
+Grid traversal of the parameter space (depth-first or breath-first search) is still
+useful in collecting statistical data, but it needs more reliable algorithms, espe-
+cially for high-rank metamorphosis-prone species.
+    All data collected from automation or crowdsourcing would be stored in a
+central database for further analysis. Using well-established techniques in re-
+lated scientific disciplines, the data could be used for dynamical systems analy-
+sis (e.g. quasi-period distribution, Lyapunov exponents, transition probabilities
+matrix), shape analysis (computational anatomy, statistical shape analysis, al-
+gorithmic complexity [70]), time-series analysis (cf. in astronomy [71]), and
+automatic classification (unsupervised or semi-supervised learning).
+
+
+
+
+                                        42
+4.4.4    Variants and Generalizations
+We could also explore variants and further generalizations of Lenia, for example,
+higher-dimensional spaces (e.g. 3D) [72, 73, 42]; different kinds of grids (e.g.
+hexagonal, Penrose tiling, irregular mesh) [74, 75, 76]; different structures of
+kernel (e.g. non-concentric rings); other updating rules (e.g. asynchronous,
+heterogeneous, stochastic) [77, 78, 79].
+
+4.4.5    Artificial Life and Artificial Intelligence
+It has been demonstrated that Lenia shows a few signs of a living system:
+
+    • Self-organization: patterns develop well-defined structures
+    • Self-regulation: patterns maintain dynamical equilibria via oscillation etc.
+    • Self-direction: patterns move consistently through space
+    • Adaptability: patterns adapt to changes via plasticity
+    • Evolvability: patterns evolve via manual operations and potentially ge-
+      netic algorithms
+
+     We should seek whether these are merely superficial resemblances with bi-
+ological life or are indications of deeper connections. In the latter case, Lenia
+could contribute to the endeavors of artificial life in attempting to “understand
+the essential general properties of living systems by synthesizing life-like behav-
+ior in software” [80], or could even add to the debate about the definitions of
+life as discussed in astrobiology and virology [81, 82]. In the former case, Lenia
+can still be regarded as a “mental exercise” on how to study a complex system
+using various methodologies.
+     Lenia could also be served as a “machine exercise” to provide a substrate
+or testbed for parallel computing, artificial life and artificial intelligence. The
+heavy demand in matrix calculation and pattern recognition could act as a
+benchmark for machine learning and hardware acceleration; the huge search
+space of patterns, possibly in higher dimensions, could act as a playground for
+evolutionary algorithms in the quest of algorithmizing and ultimately under-
+standing open-ended evolution. [83]
+
+
+5       Online Resources
+    • Showcase video of Lenia at https://vimeo.com/277328815
+    • Source code of Lenia at http://github.com/Chakazul/Lenia
+    • Source code of Primordia at http://github.com/Chakazul/Primordia
+
+
+Acknowledgments
+I would like to thank David Ha, Sam Kriegman, Tim Hutton, Kyrre Glette,
+Pierre-Yves Oudeyer, and Lana Sinapayen for valuable discussions, suggestions
+
+
+
+                                        43
+and insights; Bogdan Opanchuk who actively maintains the Reikna Python li-
+brary that makes GPU acceleration easy [84]; Mikola Lysenko who implemented
+FFT for SmoothLife [85].
+
+
+References
+ [1] M. A. Bedau, J. S. McCaskill, N. H. Packard, S. Rasmussen, C. Adami,
+     D. G. Green, T. Ikegami, K. Kaneko, and T. S. Ray, “Open problems in
+     artificial life,” Artificial Life, 6(4), 2000 pp. 363–376.
+ [2] H. Sayama, “Swarm chemistry,” Artificial Life, 15(1), 2009 pp. 105–114.
+
+ [3] T. Schmickl, M. Stefanec, and K. Crailsheim, “How a life-like system
+     emerges from a simple particle motion law,” Scientific Reports, 6, 2016
+     p. 37969.
+ [4] R. P. Munafo, “Stable localized moving patterns in the 2-D Gray-Scott
+     model,”, arXiv preprint, 2014.
+ [5] M. Gardner, “Mathematical games: the fantastic combinations of John
+     Conway’s new solitaire game “life”,” Scientific American, 223(4), 1970
+     pp. 120–123.
+ [6] S. Wolfram, “Statistical mechanics of cellular automata,” Reviews of Mod-
+     ern Physics, 55(3), 1983 p. 601.
+ [7] K. Sims, “Evolving 3D morphology and behavior by competition,” Artificial
+     Life, 1(4), 1994 pp. 353–372.
+ [8] N. Cheney, R. MacCurdy, J. Clune, and H. Lipson, “Unshackling evolution:
+     evolving soft robots with multiple materials and a powerful generative en-
+     coding,” in Proceedings of the Genetic and Evolutionary Computation Con-
+     ference, ACM, 2013 pp. 167–174.
+ [9] S. Kriegman, N. Cheney, and J. Bongard, “How morphological development
+     can guide evolution,” Scientific Reports, 8(1), 2018 p. 13934.
+
+[10] M. S. Dodd, D. Papineau, T. Grenne, J. F. Slack, M. Rittner, F. Pira-
+     jno, J. O’neil, and C. T. Little, “Evidence for early life in Earth’s oldest
+     hydrothermal vent precipitates,” Nature, 543(7643), 2017 p. 60.
+[11] D. E. Koshland, “The seven pillars of life,” Science, 295(5563), 2002
+     pp. 2215–2216.
+
+[12] C. P. McKay, “What is lifeand how do we search for it in other worlds?,”
+     PLoS Biology, 2(9), 2004 p. e302.
+[13] C. Sagan, “Life,” in Encyclopedia Britannica, London: William Benton,
+     1970.
+
+
+                                       44
+[14] E. Schrödinger, What is Life?: The Physical Aspect of the Living Cell and
+     Mind and Matter, Cambridge University Press, 1967.
+[15] E. O. Wilson, Biophilia, Harvard University Press, 1984.
+[16] C. Langton, “Studying artificial life with cellular automata,” Physica D:
+     Nonlinear Phenomena, 22(1-3), 1986 pp. 120–149.
+[17] S. Wolfram, A New Kind of Science, Champaign, IL: Wolfram media, 2002.
+[18] J. Von Neumann, “The general and logical theory of automata,” Cerebral
+     Mechanisms in Behavior, 1(41), 1951 pp. 1–2.
+[19] S. Ulam, “On some mathematical problems connected with patterns of
+     growth of figures,” in Proceedings of Symposia in Applied Mathematics (Vol.
+     14), 1962 pp. 215–224.
+[20] A. Adamatzky, ed., Game of Life Cellular Automata, London: Springer,
+     2010.
+[21] ConwayLife.com, “LifeWiki, the wiki for Conway’s Game of Life.” (2018-
+     12-10), [Online] http://www.conwaylife.com/wiki/Main_Page.
+[22] P. Rendell, “Turing universality of the Game of Life,” in Collision-Based
+     Computing, pp. 513–539, London: Springer, 2002.
+[23] B. MacLennan, Continuous spatial automata, Technical report CS-90-121,
+     Department of Computer Science, University of Tennessee, Knoxville, 1990.
+[24] D. Griffeath, “Self-organization of random cellular automata: four snap-
+     shots,” in Probability and Phase Transition, pp. 49–67, Dordrecht:
+     Springer, 1994.
+[25] K. M. Evans, “Larger than Life: digital creatures in a family of two-
+     dimensional cellular automata,” in Discrete Mathematics and Theoretical
+     Computer Science Proceedings vol. AA, 2001 pp. 177–192.
+[26] M. Pivato, “RealLife: The continuum limit of Larger than Life cellular
+     automata,” Theoretical Computer Science, 372(1), 2007 pp. 46–68.
+[27] S. Rafler, “Generalization of Conway’s ”Game of Life” to a continuous
+     domain-SmoothLife,”, arXiv preprint, 2011.
+[28] R. P. Munafo, “Catalog of Patterns at F=0.0620, k=0.0609.” (2009), [On-
+     line] http://mrob.com/pub/comp/xmorphia/catalog.html.
+[29] H. Sayama, “Swarm Chemistry Homepage — Sample Recipes.”
+     (2018-07-29), [Online] http://bingweb.binghamton.edu/~sayama/
+     SwarmChemistry/.
+[30] K. M. Evans, “Larger than Life: threshold-range scaling of Life’s coherent
+     structures,” Physica D: Nonlinear Phenomena, 183(1-2), 2003 pp. 45–67.
+
+
+                                      45
+[31] T. J. Hutton, “SmoothLifeL glider closeup.” (2012-10-10), [Video] https:
+     //www.youtube.com/watch?v=IJO-DETel0M.
+[32] B. Berger, “Big wobbly glider in SmoothLife,” (2017-03-28), [Video].
+[33] W. Kahan, “Lecture Notes on the Status of IEEE Standard 754 for Bi-
+     nary Floating-Point Arithmetic.” (1997-10-01), [Online] http://http.cs.
+     berkeley.edu/~wkahan/ieee754status/ieee754.ps.
+[34] J. W. Cooley and J. W. Tukey, “An algorithm for the machine calcula-
+     tion of complex Fourier series,” Mathematics of Computation, 19(90), 1965
+     pp. 297–301.
+
+[35] H. Takagi, “Interactive evolutionary computation: Fusion of the capabili-
+     ties of EC optimization and human evaluation,” Proceedings of the IEEE,
+     89(9), 2001 pp. 1275–1296.
+[36] M. K. Hu, “Visual pattern recognition by moment invariants,” IRE Trans-
+     actions on Information Theory, 8(2), 1962 pp. 179–187.
+
+[37] J. Flusser, “Moment invariants in image analysis,” In Proceedings of World
+     Academy of Science, Engineering and Technology, 11(2), 2006 pp. 196–201.
+[38] C. Linnaeus, Systema naturae per regna tria naturae, secundum classes,
+     ordines, genera, species, cum characteribus, differentiis, synonymis, locis,
+     Stockholm: Impensis Direct, Laurentii Salvii, 10th ed., 1758.
+[39] T. Jansen, “Strandbeests,” Architectural Design, 78(4), 2008 pp. 22–27.
+[40] H. Sayama, “Seeking open-ended evolution in Swarm Chemistry,” in Pro-
+     ceedings of the Third IEEE Symposium on Artificial Life, IEEE, 2011
+     pp. 186–193.
+
+[41] H. Sayama, “Seeking open-ended evolution in Swarm Chemistry II: Analyz-
+     ing long-term dynamics via automated object harvesting,” in Proceedings
+     of the 2018 Conference on Artificial Life, 2018 pp. 59–66.
+[42] T. J. Hutton, “A 3D glider in the U-Skate World (reaction-diffusion).”
+     (2012), [Video] https://www.youtube.com/watch?v=WYZVffOaRgA.
+[43] M. Cook, “Universality in elementary cellular automata,” Complex Sys-
+     tems, 15(1), 2004 pp. 1–40.
+[44] A. Ilachinski, Cellular Automata: a Discrete Universe, World Scientific
+     Publishing Company, 2001.
+
+[45] G. J. Martı́nez, A. Adamatzky, and H. V. McIntosh, “A computation in
+     a cellular automaton collider rule 110,” in Advances in Unconventional
+     Computing, pp. 391–428, 2017.
+
+
+
+                                       46
+[46] S. Wolfram, “Computation theory of cellular automata,” Communications
+     in Mathematical Physics, 96(1), 1984 pp. 15–57.
+[47] K. M. Evans, “Is Boscos rule universal?,” in International Conference on
+     Machines, Computations, and Universality, 2004 pp. 188–199.
+
+[48] E. R. Berlekamp, J. H. Conway, and R. K. Guy, Winning Ways for Your
+     Mathematical Plays, Volume 2, AK Peters/CRC Press, 2018.
+[49] H. Zenil, N. A. Kiani, and J. Tegnér, “Algorithmic information dynamics
+     of persistent patterns and colliding particles in the Game of Life,”, arXiv
+     preprint, 2018.
+
+[50] C. R. Marshall, “Explaining the Cambrian “explosion” of animals,” Annual
+     Review of Earth and Planetary Sciences, 34, 2006 pp. 355–384.
+[51] E. H. P. Haeckel, Kunstformen der Natur, Leipzing und Wien, 1904.
+[52] K. Porter, “CIL:11397, Myotis lucifugus.” (2011), [Online] http://www.
+     cellimagelibrary.org/images/11397.
+[53] R. L. Mayden, “A hierarchy of species concepts: the denouement in the
+     saga of the species problem,” in Species: The Units of Biodiversity (M. F.
+     Claridge et al., eds.), p. 381424, Springer, 1997.
+[54] C. Darwin, On the Origin of Species, London: John Murray, 1859.
+
+[55] P. H. Sneath and R. R. Sokal, Numerical Taxonomy, The Principles and
+     Practice of Numerical Classification, San Francisco: Freeman, 1973.
+[56] J. Mallet, “A species definition for the modern synthesis,” Trends in Ecology
+     & Evolution, 10(7), 1995 pp. 294–299.
+
+[57] E. Mayr, Systematics and the Origin of Species, from the Viewpoint of a
+     Zoologist, Cambridge: Harvard University Press, 1942.
+[58] G. G. Simpson, “The species concept,” Evolution, 5(4), 1951 pp. 285–298.
+[59] W. Hennig, Phylogenetic Systematics, Urbana: University of Illinois Press,
+     1966.
+[60] L. Van Valen, “Ecological species, multispecies, and oaks,” Taxon, 25, 1976
+     pp. 233–239.
+[61] J. Secretan, N. Beato, D. Ambrosio, D. B., A. Rodriguez, A. Campbell,
+     and K. O. Stanley, “Picbreeder: evolving pictures collaboratively online,”
+     in Proceedings of the SIGCHI Conference on Human Factors in Computing
+     Systems, ACM, 2008 pp. 1759–1768.
+[62] J. Simon, “Ganbreeder.” (2018-12-18), [Code] https://github.com/
+     joel-simon/ganbreeder.
+
+
+                                       47
+[63] D. Ha, “Reinforcement learning for improving agent design,”, arXiv
+     preprint, 2018.
+[64] K. O. Stanley, “Compositional pattern producing networks: A novel ab-
+     straction of development,” Genetic Programming and Evolvable Machines,
+     8(2), 2007 pp. 131–162.
+
+[65] J. Collins, W. Geles, D. Howard, and F. Maire, “Towards the targeted
+     environment-specific evolution of robot components,” in Proceedings of the
+     Genetic and Evolutionary Computation Conference, ACM, 2018 pp. 61–68.
+[66] K. O. Stanley and R. Miikkulainen, “Evolving neural networks through
+     augmenting topologies,” Evolutionary Computation, 10(2), 2002 pp. 99–
+     127.
+[67] J. Lehman and K. O. Stanley, “Abandoning objectives: Evolution through
+     the search for novelty alone,” Evolutionary Computation, 19(2), 2011
+     pp. 189–223.
+
+[68] J. K. Pugh, L. B. Soros, and K. O. Stanley, “Quality diversity: A new
+     frontier for evolutionary computation,” Frontiers in Robotics and AI, 3,
+     2016 p. 40.
+[69] A. Baranes and P. Y. Oudeyer, “Active learning of inverse models with in-
+     trinsically motivated goal exploration in robots,” Robotics and Autonomous
+     Systems, 61(1), 2013 pp. 49–73.
+[70] H. Zenil, N. A. Kiani, and J. Tegnér, “Symmetry and correspondence of
+     algorithmic complexity over geometric, spatial and topological representa-
+     tions,” Entropy, 20(7), 2018 p. 534.
+
+[71] S. Vaughan, “Random time series in astronomy,” Philosophical Transac-
+     tions of the Royal Society A: Mathematical, Physical & Engineering Sci-
+     ences, 371(1984), 2012 p. 20110549.
+[72] C. Bays, “Candidates for the game of life in three dimensions,” Complex
+     Systems, 1(3), 1987 pp. 373–400.
+
+[73] K. Imai, Y. Masamori, C. Iwamoto, and K. Morita, “On designing glid-
+     ers in three-dimensional Larger than Life cellular automata,” in Natural
+     Computing, pp. 184–190, Tokyo: Springer, 2010.
+[74] A. Adamatzky, A. Wuensche, and B. D. L. Costello, “Glider-based com-
+     puting in reaction-diffusion hexagonal cellular automata,” Chaos, Solitons
+     & Fractals, 27(2), 2006 pp. 287–295.
+[75] A. P. Goucher, “Gliders in cellular automata on Penrose tilings,” Journal
+     of Cellular Automata, 7(5-6), 2012 pp. 385–392.
+
+
+
+
+                                      48
+[76] B. Bochenek and K. Tajs-Zielińska, “GOTICA - generation of optimal
+     topologies by irregular cellular automata,” Structural and Multidisciplinary
+     Optimization, 55(6), 2017 pp. 1989–2001.
+[77] N. Fates, “A guided tour of asynchronous cellular automata,” in Inter-
+     national Workshop on Cellular Automata and Discrete Complex Systems,
+     (Berlin, Heidelberg), Springer, 2013 pp. 15–30.
+[78] C. Ryan, J. Fitzgerald, T. Kowaliw, R. Doursat, S. Carrignon, and D. Med-
+     ernach, “Evolution of heterogeneous cellular automata in fluctuating envi-
+     ronments,” in Proceedings of the European Conference on Artificial Life 13,
+     2016 pp. 216–223.
+
+[79] P. Y. Louis and F. R. Nardi, eds., Probabilistic Cellular Automata: Theory,
+     Applications and Future Perspectives, Springer, 2018.
+[80] M. A. Bedau, “Artificial life: organization, adaptation and complexity from
+     the bottom up,” Trends in Cognitive Sciences, 7(11), 2003 pp. 505–512.
+
+[81] S. A. Benner, “Defining life,” Astrobiology, 10(10), 2010 pp. 1021–1030.
+[82] P. Forterre, “Defining life: the virus viewpoint,” Origins of Life and Evo-
+     lution of Biospheres, 40(2), 2010 pp. 151–160.
+[83] T. Taylor, M. Bedau, A. Channon, D. Ackley, W. Banzhaf, G. Beslon,
+     E. Dolson, T. Froese, S. Hickinbotham, T. Ikegami, and B. McMullin,
+     “Open-ended evolution: perspectives from the OEE workshop in York,”
+     Artificial Life, 22(3), 2016 pp. 408–423.
+[84] B. Opanchuk, “Reikna, a pure Python GPGPU library.” (2018), [Software]
+     http://reikna.publicfields.net/.
+
+[85] M. Lysenko, “Conways Game of Life for Curved Surfaces
+     (Part   1).”   (2012),   [Blog]  https://0fps.net/2012/11/19/
+     conways-game-of-life-for-curved-surfaces-part-1/.
+
+
+
+
+                                       49
+

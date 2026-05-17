@@ -1,0 +1,543 @@
+                                            Flow-Lenia: Towards open-ended evolution in cellular automata through mass
+                                                             conservation and parameter localization
+                                                         Erwan Plantec1 , Gautier Hamon1 , Mayalen Etcheverry1,2 , Pierre-Yves Oudeyer1 ,
+                                                                      Clément Moulin-Frier1 and Bert Wang-Chak Chan1,3
+                                                                                        1
+                                                                                         FLOWERS Team, Inria, Bordeaux, France
+                                                                                                  2
+                                                                                                    Poietis, Pessac, France
+                                                                                       3
+                                                                                         Brain Team, Google research, Tokyo, Japan
+                                                                                                    eplantec@gmail.com
+
+
+
+
+arXiv:2212.07906v2 [cs.NE] 24 Mar 2023
+                                                                     Abstract
+
+                                           The design of complex self-organising systems producing
+                                           life-like phenomena, such as the open-ended evolution of vir-
+                                           tual creatures, is one of the main goals of artificial life. Le-
+                                           nia, a family of cellular automata (CA) generalizing Con-
+                                           way’s Game of Life to continuous space, time and states,
+                                           has attracted a lot of attention because of the wide diver-                 (a)                (b)                (c)
+                                           sity of self-organizing patterns it can generate. Among those,
+                                           some spatially localized patterns (SLPs) resemble life-like ar-
+                                           tificial creatures and display complex behaviors. However,
+                                           those creatures are found in only a small subspace of the Le-
+                                           nia parameter space and are not trivial to discover, neces-
+                                           sitating advanced search algorithms. Furthermore, each of
+                                           these creatures exist only in worlds governed by specific up-
+                                           date rules and thus cannot interact in the same one. This pa-               (d)                (e)                (f)
+                                           per proposes as mass-conservative extension of Lenia, called
+                                           Flow Lenia, that solve both of these issues. We present ex-
+                                           periments demonstrating its effectiveness in generating SLPs
+                                           with complex behaviors and show that the update rule param-
+                                           eters can be optimized to generate SLPs showing behaviors
+                                           of interest. Finally, we show that Flow Lenia enables the
+                                           integration of the parameters of the CA update rules within
+                                           the CA dynamics, making them dynamic and localized, al-                     (g)                (h)                (i)
+                                           lowing for multi-species simulations, with locally coherent
+                                           update rules that define properties of the emerging creatures,
+                                           and that can be mixed with neighbouring rules. We argue
+                                           that this paves the way for the intrinsic evolution of self-
+                                           organized artificial life forms within continuous CAs. A note-
+                                           book with Flow Lenia implementation and demo are available                                     (j)
+                                           at https://tinyurl.com/mr2ncy3h.
+                                                                                                               Figure 1: Flow Lenia creatures. (a-c) Samples of crea-
+                                                                                                               tures found through random search in Flow Lenia param-
+                                                                 Introduction                                  eter space. (d-f) and (g-i) Timelapses of patterns found
+                                         Complex self-organizing systems have been central to Ar-              through random search. Colors in (g-i) code for dif-
+                                         tificial Life (ALife) towards the search of emergent life-            ferent channels. (j) Effect of changing temperature in
+                                         reminiscent phenomenons. Among those systems are con-                 Flow Lenia, temperature is linearly increasing from left
+                                         tinuous cellular automata (CAs) like SmoothLife (Rafler,              to right. Videos are available at https://sites.
+                                         2011) or Lenia (Chan, 2019). Lenia is a family of CAs                 google.com/view/flowlenia/videos.
+                                         generalizing Conway’s Game of Life (GoL) to continuous
+                                         space, time and states (Chan, 2019, 2020). Each instance
+                                         of Lenia is given by a specific configuration of parameters
+                                         defining its update rule and an initial configuration which              Previous studies with Lenia have shown the emergence
+                                         map to a specific pattern and behavior in a deterministic way.        of autopoı̈etic (i.e self-produced) spatially localized pat-
+                                         Lenia is a generalization of GoL as the latter corresponds to         terns (SLPs), also called “creatures”, often resembling mi-
+                                         a specific parameter set in Lenia.                                    croscopic life-forms and displaying various behaviors like
+motility or self-replication. Such observations have made          2017) with respect to some fitness functions to obtain pat-
+Lenia a particularly interesting system for studying the           terns with specific properties such as directed motion or an-
+emergence of life-like phenomenon and even sensori-motor           gular motion. Importantly, we show that the Flow Lenia
+capabilities (Hamon et al., 2022). Importantly, these artifi-      formulation enables the integration of the parameters of the
+cial creatures bear a deep similarity to their biological coun-    CA update rules within the CA dynamics, making them dy-
+terparts as enacted agents endowed with constitutive auton-        namic and localized, allowing for multi-species simulations,
+omy (i.e creatures are self-producing) as described by en-         with locally coherent update rules that define properties of
+active theories of cognition (see Froese and Ziemke (2009)         the emerging creatures. Finally, we propose a resource col-
+for a more complete discussion on enactive artificial intelli-     lection mechanism which could act as a selective pressure in
+gence).                                                            such multi-species simulations.
+However, those patterns are quite difficult to find, necessi-
+tating complex fine-tuned search algorithms in order to find                                   Model
+update rule parameters allowing the emergence of interest-         Let L be the support of a CA, which is the two-dimensional
+ing patterns (e.g spatially localized patterns). For instance,     grid Z2 in the rest of this work. Let At : L → S C be CA’s
+complex patterns have been found in (Hamon et al., 2022)           activations at time t, with Ati (x) the activation in location
+using intrinsically motivated goal exploration processes and       x ∈ L, channel i and time t. C is the number of channels
+gradient descent.                                                  of the system ans S is the state space (the set of states a cell
+An other important challenge in ALife and artificial intel-        can take in each channel).
+ligence is about the design of systems displaying open-
+ended intrinsic evolution (i.e unbounded growth of complex-        Lenia
+ity through intrinsic evolutionary processes) (Stanley, 2019).     The state space S in Lenia is the unit range [0, 1]. An in-
+Such a process is called intrinsic since no final objective (i.e   stance of Lenia is defined by a tuple < K, G, A0 > where
+fixed fitness function) is set by the experimenter, the fitness             R of convolution kernels where Ki : L → [0, 1]
+                                                                   K is a set
+landscape is intrinsic to the system and depends only on its       satisfies L Ki = 1 and G is a set of growth functions with
+current state, as in natural evolution where there is no final     Gi : [0, 1] → [−1, 1]. Each pair (Ki , Gi ) is associated to a
+goal (Lehman and Stanley, 2011). Systems like EvoLoop              source channel ci0 it senses and a target channel ci1 it updates.
+(Sayama, 1999) or an extension of it, SexyLoop (Oros and           Connectivity canbe represented througha square adjacency
+Nehaniv, 2007), allow for evolutionary processes to occur                                m11 · · · m1C
+in CAs. However, such systems rely on hand-defined rules                             ..         ..      ..  where m ∈ N is
+                                                                   matrix MC,C =  .                .     .               ij
+and particular structures ultimately limiting the kind of pat-
+                                                                                        mC1 · · · mCC
+terns that can emerge in the system. On the other hand, even
+                                                                   the number of kernels sensing channel i and updating chan-
+though Lenia creatures display greater diversity, different
+                                                                   nel j. A0 is the initial state of the system. As in Hamon
+creatures (governed by different update rules) cannot exist
+                                                                   et al. (2022), kernels are radially symmetrical and defined as
+in the same world (i.e the same simulation) and thus cannot
+                                                                   a sum of concentric Gaussian bumps :
+interact. Obtaining such an evolutionary process in a CA
+                                                                                        k
+                                                                                                                          !
+could be achieved by embedding information in the system                               X                 ( rixR − ai,j )2
+locally modifying the update rule and so the properties of                   Ki (x) =       bi,j exp −           2            (1)
+                                                                                       j=1
+                                                                                                               2wi,j
+emerging creatures, like a genome, enabling multi-species
+simulations. Such simulations might set the stage for evolu-       Where ai , bi , wi and ri are parameters defining kernel i. k
+tion to occur in populations of patterns each with their own       is a parameter defining the number of rings per kernel (set to
+update rule. However, achieving it in CAs like Lenia is still      3 here) and R is a parameter common to all kernels defining
+an open-problem.                                                   the maximum neighborhood radius. Each kernel is then de-
+We believe that adding mass conservation is a key ingredient       fined by 3 × k + 1 parameters. Growth functions are defined
+to address the aforementioned challenges. Such a constraint        as Gaussian function scaled in the range [−1, 1]:
+could (i) constrain emerging creatures to spatially localized
+                                                                                                    (µi − x)2
+                                                                                                             
+ones, (ii) allow for the design of multi-species simulations
+                                                                               Gi (x) = 2 exp −                 −1           (2)
+and (iii) provide an important evolutionary pressure (Hick-                                            2σi2
+inbotham and Stepney, 2015). We propose in this work a
+                                                                   Where µi and σi are parameters of growth function i so each
+mass-conservative extension to Lenia called Flow Lenia and
+                                                                   growth function is defined by 2 parameters. A step in Lenia
+demonstrate that such conservation laws effectively facili-
+                                                                   is defined by the following steps (see figure 2 (top)) :
+tate the search fort artificial creatures by constraining (al-
+most all) emerging patterns to spatially localized ones. We        1. Compute the growth at time t given the actual state At :
+also show that the update rule parameters can easily be opti-                        X
+mized using vanilla evolutionary strategies (Salimans et al.,                  Ujt =     hi · Gi (Ki ∗ Atci )1[ci1 =j]      (3)
+                                                                                                              0
+                                                                                          i
+Figure 2: Top left : Lenia update rule. The growth U t is computed with kernels K and growth functions G (equation 3) defined
+by a specific parameter configuration sampled in Lenia’s parameter space. A small portion of the growth is then added to
+activations At to give the next state At+dt (equation 4). Bottom left : Flow Lenia update rule. Affinity map U t is computed
+as in Lenia. The flow F t is given by combining the affinity map and concentration (i.e activations) gradients (equation 5).
+Finally, the next state is obtained by “moving” matter in the CA space according to the flow F t using reintegration tracking
+(RT) (equations 6 and 7). Right : Patterns generated from randomly sampled parameters sets (no cherry picking) in Lenia (left)
+and Flow Lenia (right). Parameters used for both systems are the same (i.e each row corresponds to one parameters set).
+
+                                                                                     PC
+   Where h ∈ R|K| is a vector weighting the impact of each         With AtΣ (p) = i=1 Ati (p) the total mass in each location
+   pair (Ki , Gi ) on the growth.                                  p. Here ∇Uit is the affinity gradient for channel i. The neg-
+                                                                   ative concentration gradient −∇AtΣ is a diffusion term to
+2. Add a small portion of the growth U t to the actual state       avoid concentrating all the matter in very small regions akin
+   At to get the state at the next time step and clip results      to the clipping in Lenia which upper bounds concentrations.
+   back to the unit range :                                        In practice, gradients are estimated through Sobel filtering.
+                    At+dt = [Ati + dt Uit ]10               (4)    Map α : L → [0, 1] is used to weight the importance of each
+                     i
+                                                                   term such that −∇AtΣ dominates when the total mass at a
+Flow Lenia                                                         given location is close to a critical mass θA ∈ R>0 . Intu-
+                                                                   itively, the result is that matter is mainly driven by concen-
+Flow Lenia is a mass-conservative extension to Lenia. By
+                                                                   tration gradients in high concentrations regions and is more
+mass-conservative, we mean that the sum of activations
+                                                                   free to move along the affinity gradient in less concentrated
+across all cells and for each channel is constant over time
+                                                                   areas. We typically use n > 1 such that the affinity gradient
+:        X          X                                              dominates on a larger range of masses.
+              Atc =      Act+dt , ∀t, ∀c ∈ {1, ..., C}
+                                                                   Then, we can move matter in space according to flow F giv-
+         x∈L        x∈L
+                                                                   ing us the state at the next time step. To do so we use the
+   We propose for this system to interpret activations as con-     reintegration tracking method proposed in (Moroz, 2020).
+centrations of “matter” in all cells and to refer to the term      Reintegration tracking is a semi-Lagrangian grid based al-
+U t , previously called the growth in Lenia, as an affinity map.   gorithm thought as a reformulation of particle tracking in
+The idea is that the matter will move towards higher affinity      screen space (i.e grid space) aimed at not losing information
+regions by following the local gradient of the affinity map U ,    (i.e particles) which happens when two particles end up in
+∇U : L → R2 . To do so, we define a flow F : L → (R2 )C ,          the same cell. The basic principle is to work with distribu-
+which can be interpreted as the instantaneous speed of mat-        tion of particles (i.e infinite number of particles) and con-
+ter, as:      (                                                    serve the total mass by adding up masses going on a same
+                Fit = (1 − αt )∇Uit − αt ∇AtΣ                      cell. Overall, reintegration tracking can be seen as a grid-
+                                                             (5)
+                αt (p) = [(AtΣ (p)/θA )n ]10
+based approximation to particle systems with infinite num-
+ber of particles having the property to conserve total mass.
+Thus, Flow lenia can be seen as a new kind of model at
+the frontier between continuous CAs and particle systems.
+A particle based model directly inspired by the Flow Le-
+nia formulation has been recently proposed in Mordvintsev
+et al. (2022). Figure 3 illustrates how reintegration tracking
+is used in our case. The resulting update rule is the following
+:
+                             X
+               At+dt
+                 i   (p) =        Ati (p0 )Ii (p0 , p)      (6)
+                            p0 ∈L
+
+Where Ii (p0 , p) is the proportion of incoming matter in chan-
+nel i going from cell p0 ∈ L to cell p ∈ L:
+                                 Z
+                 Ii (p0 , p) =           D(p00i , s)         (7)
+                                 Ω(p)
+
+
+With p00i = p0 + dt · Fit (p0 ) the target location of the flow    Figure 3: Calculation of incoming matter to cell p ∈ L
+from p0 . Ω(p) is the domain of cell at location p, which          through reintegration tracking (Moroz, 2020). Mass con-
+is a square of side 1. D(m, s) is a distribution     defined on    tained in cell at location p0 ∈ L is moved to a square distri-
+                                                                   bution D centered on p00 = p0 + dt · F t (p0 ). The proportion
+                                                R
+L with mean m and variance s satisfying L D(m, s) = 1,
+which is in practice a uniform square distribution with side       of mass from p0 arriving in p is then given by the integral of
+length 2s centered at m. This distribution emulates a flow         D on the cell domain of p, Ω(p), denoted as I(p0 , p).
+of particles from source area Ω(p0 ) to target area D(p00 , s),
+where the distribution D emulates Brownian motion at the
+low level. s is an hyperparameter of the system which can          Random search
+be seen as form of temperature. The reintegration tracking         By performing random and manual search of the Flow Le-
+method is depicted in Fig. 3. Since the distribution D inte-       nia parameter and hyperparameter space described in table 1
+grates to 1, it is clear that a cell cannot send out more mass     we have been able to discover SLPs with already interesting
+than it contains nor less and so the system conserves its to-      and complex behaviors. Such patterns are shown in figure
+tal mass. Mass conservation also implies that cells’ states        1 and described hereafter. Initial patterns A0 are set with a
+are no longer bound to the unit range but can be any posi-         40 × 40 patch with matter drawn from uniform distribution
+tive real valued number (S ≡ RC       ≥0 ). This model has been    in the center of the grid and no matter everywhere else.
+implemented in JAX (Bradbury et al., 2018) allowing fast           Most of the patterns generated in Flow Lenia are SLPs (see
+simulation on GPU (255µs ± 3.11µs per step on Tesla T4             figure 2) with rare exceptions found by manually setting pa-
+GPU with 1 channel, 10 kernels and 128 × 128 world size).          rameters to specific configurations leading to scattered mat-
+                                                                   ter. Using multiple kernels led to the emergence of SLPs
+                           Results                                 with more complex shapes and behaviors. While part of
+                                                                   emerging patterns tend to be static ones, dynamic patterns
+                                                                   are quite common in Flow Lenia. For instance gyrating
+         Neighborhood                   Growth functions           SLPs (a) or snake like patterns (b) with complex motion
+     R      ∈ [2, 25]                µ    ∈ [0.05, 0.5] *          emerging from attraction/repulsion dynamics can be fre-
+     r      ∈ [0.2, 1]       *       σ    ∈ [0.001, 0.2] *         quently observed. Dividing and merging dots (c) resem-
+            Kernels                           Flow                 bling reaction-diffusion patterns are also a common pat-
+     h       ∈ [0, 1]        *       s         0.65                tern. Timelapse (d-f) shows a creature with complex and
+     a      ∈ [0, 1]3        *       n           2                 unpredictable dynamics emerging from the interactions of
+     b      ∈ [0, 1]3        *       dt        0.2                 its membrane, multiple organoids-like structures and a cen-
+     w    ∈ [0.01, 0.5]3     *                                     tral nuclei ultimately leading to a phase transition happening
+                                                                   in (e). Timelapse (g-e) shows a 2-channels creature display-
+Table 1: Flow Lenia explored parameter space. Parameters           ing complex division patterns and interesting modular crea-
+marked with a * must be sampled for each kernel-growth             tures whose characteristics change depending on their total
+function pair.                                                     mass while being of the same “kind” (i) (see 5 creatures on
+                                                                   the leftmost part of (i)). Note that multi-channel creatures
+often show more complex dynamics and patterns with very
+modular shapes where each channel seems to occupy a dif-
+ferent role. (j) shows the effect of changing the size of the
+reintegration tracking distribution s (see equation 7 and fig-
+ure 3), parameter we call temperature. Here temperature is
+linearly increasing from left to right showing very different
+phases of the systems. More interestingly, patterns at the
+frontier between the Turing-like phase (center) and the equi-
+librium phase (right) are much more dynamic and display                         (a)                          (b)
+unpredictable dynamics suggesting a critical regime.
+
+Optimizing Flow Lenia creatures
+
+
+
+
+                                                                                (c)                          (d)
+
+                                                                 Figure 5: Creatures found through optimization. (a) Di-
+                                                                 rected motion with 2 channels and 20 kernels. (b) An-
+                                                                 gular motion with 2 channels and 20 kernels. (c) Mo-
+                                                                 tion through obstacles with 2 channels and 25 kernels.
+                                                                 (d) Chemotaxis with 2 channels and 25 kernels. Videos
+                                                                 ara availabe at https://sites.google.com/view/
+                                                                 flowlenia/videos.
+
+
+                                                                 sity to account for it when searching for creatures. Using
+                                                                 evolutionary strategies (Salimans et al., 2017) to optimize
+                                                                 the update rule parameters and the initial configuration (A0 )
+                                                                 with respect to user-defined fitness functions, we have been
+                                                                 able to successfully find good solutions for 4 different tasks
+                                                                 : directed motion, angular motion, navigation through ob-
+Figure 4: Results of evolutionary optimization. C is the         stacles and chemotaxis.
+number of channels of the system and k is the number of          We used evosax (Lange, 2022) implementation of the
+kernels and growth functions. When performing the exact          OpenES strategy with population size of 16 and adam opti-
+same optimization for directed motion in the original Lenia      mizer (Kingma and Ba, 2017) with 0.01 as learning rate. We
+system (yellow curve), not only optimization is unstable but     optimized the Flow Lenia update rule with different number
+it only discovers exploding patterns.                            of kernels and either 1 or 2 channels. For comparison, we
+                                                                 also trained original Lenia on the directed motion task fol-
+   In this section, we show that Flow Lenia update rule pa-      lowing the same optimization procedure. The initial pattern
+rameters can also be easily optimized so to generate pat-        is composed, as in random search, of a square patch with
+terns with specific behaviors. This is a difficult task in Le-   non-zero activations placed at the center of the world and
+nia as it would require constantly monitoring the existen-       zeros everywhere else. Results are shown in figure 4.
+tial status and the spatially-localizedness of evolved crea-
+tures. Thus training creatures in Lenia requires to define       Directed motion In order to train creatures displaying di-
+characterizations of creatures accounting for such properties    rected motion, i.e straight line motion, we used the distance
+which is a far from trivial problem. Moreover, even if one       travelled by the creature as the fitness function. The distance
+can come up with proxies to find spatially localized patterns,   is calculated by computing the center of mass of the pattern
+the optimization process remains difficult necessitating ad-     at step 0 and final step 400. Formally, the fitness function is
+vanced optimization methods like curriculum learning (Ha-        defined as :
+mon et al., 2022). In Flow Lenia, the spatial localization
+constraint is intrinsic to the system thus removing the neces-                  f (θ) = dist(φ(A0 ), φ(A400 ))
+   Where A ≡ {A0 , ..., AT } is the pattern obtained by mak-     observed in directed motion but here in a more intricate mor-
+ing a rollout with parameters θ for T timesteps (here 500).      phology.
+φ(At ) ∈ [−0.5, 0.5]2 is the center of mass of state At and
+dist is the euclidean distance function. We optimized the        Navigation through obstacles In this task, we want to see
+system witheither 1 or 2 channels and 10 or 20 kernels. We     if creatures can navigate through obstacles as done in Ha-
+               5 5                                               mon et al. (2022). To do so, we added walls which are im-
+used M =                as the adjacency matrix with 2 chan-     plemented by adding a strong flow going from the center
+               5 5
+                                                                 of walls outwards, thus strongly repelling the creature and
+                                        
+                                   3 2
+nels and 20 kernels and M =                with 10 kernels.      acting as a solid obstacle. At each evaluation of the op-
+                                   2 3
+Results (see fig 4) show that good solutions can be found        timization process, we randomly sample points on a circle
+in the 2 channels condition but not in the single channel        surrounding the creatures’ initial positions to be walls po-
+case. However, when running the algorithm for longer (e.g        sitions thus making a “forest” of walls around the creature.
+5000 generations), we have been able to found single chan-       We then optimize the creature with the same fitness function
+nel creatures with similar fitness than their 2 channels coun-   as in the directed motion task so creatures have to go as far as
+terpart. Increasing the number of kernels led to faster dis-     possible and so through the forest. We made the experiment
+covery of good solutions. The best performing creature is        with 2 channels creatures, walls are definedin a separate    
+shown in figure 5(a). This creature moves because of at-                                                            5 5 0
+traction/repulsion dynamics between the 2 channels which         third channel. We used 25 kernels and M =  5 5 0 
+might explain why directed motion is much easier to attain                                                          5 0 0
+with multi-channels creatures. On the other hand, the op-        as the connectivity matrix so creatures are able to sense the
+timization of the original Lenia model is much less stable       walls channel (3rd channel).
+and discovered patterns are less successful than their mass-     We have been able to successfully train creatures able to
+conservative counterparts. Moreover, every Lenia optimized       move and stay robust when making contact with walls such
+patterns are exploding ones.                                     as the one shown in figure 5 (c) which is able to resist de-
+                                                                 formation and find a way out the “forest”. In comparison,
+Angular motion In this task, we want emerging creatures          solving a similar task in Lenia required complex optimiza-
+to display more complex forms of motion. More precisely,         tion methods based on curriculum learning, diversity search
+we want creatures to be able to move and make turns. As          and gradient descent over a differentiable CA (Hamon et al.,
+with directed motion, we use the center of mass of the crea-     2022). However, such a comparison is difficult because
+ture through time to compute its trajectory. The fitness func-   Flow Lenia creatures are inherently more robust due to con-
+tion is the following :                                          servation of mass, whereas Lenia creatures can disappear
+                                                                 because of perturbations.
+
+    f (θ) = dist(φ(A0 ), φ(A200 ))                               Chemotaxis Another important feature of natural life-
+                       200            400                        forms is the ability to sense their environment in order to find
+          + dist(φ(A         ), φ(A         ))
+                                                                 food or avoid dangers through chemotaxis. In this task, we
+                    200
+          + ∠[φ(A         ) − φ(A )] [φ(A400 ) − φ(A200 )]
+                                  0
+                                                                 want creatures to be able to sense a “chemical” gradient and
+                                                                 climb it towards its maximum. To do so, we added a separate
+   Where ∠ab is the angle between vectors a and b. The first     channel Γ : L → R≥0 whose activations are defined follow-
+two terms are the distance travelled from step 0 to step 200     ing a Gaussian function around a point randomly sampled
+and from step 200 to step 400. The last term is the angle be-    on a circle surrounding the center of the CA for each eval-
+tween these two trajectories which is maximal when they are      uation of the optimization process ensuring creatures learn
+opposite. In order to avoid large angles to come from very       to follow gradient and not a fixed direction while keeping
+small movements, the angle is set to 0 when distance trav-       the distance to cover constant. We also added 5 kernels and
+eled either before or after step 200 is below a given thresh-    growth functions from Γ to A, which are also optimized, so
+old. The optimal behavior for this fitness function is then      the creature is able to sense the chemical. The fitness of an
+to move fast in one direction, make a 180° turn, and then        individual is then computed with the following function :
+move fast in the opposite direction. We used 2 channels, 20
+kernels and the same connectivity matrix as for directed mo-                             P        500
+                                                                                             x∈L AΣ (x) × Γ(x)
+tion.                                                                          f (θ) =        P       500
+                                                                                                x∈L AΣ (x)
+Result are shown in figure 4. The best performing creature,
+shown in figure 5 (b), displays very complex internal dynam-        Since mass is conserved, the optimal behavior for a crea-
+ics leading it to periodically make 180° turns while moving      ture is to concentrate as much of its mass in the cells where
+in straight line the rest of the time. These dynamics seem to    Γ is maximal.
+be generated by attraction repulsion dynamics like the ones      We have been able to find good solutions to this task as
+shown in figure 4. Best solutions such as the one shown in         As said in the introduction, Flow Lenia allows to embed
+figure 5 (d) are perfectly able to climb the gradient towards   the update rule parameters inside the CA. Intuitively, we can
+its maximum.                                                    “attach” a vector of parameters to the matter locally mod-
+                                                                ifying how it behaves (i.e locally modifying how the affin-
+   Flow Lenia : Towards intrinsic evolution                     ity map is computed), and let it flow with it. Formally, this
+                                                                comes to defining a parameter map P : L → Θ where Θ is a
+                                                                given parameter set. This map can be used to locally modify
+                                                                the update rule. For instance, we can embed the h ∈ R|K|
+                                                                vector weighting the importance of each kernel in the affin-
+                                                                ity map computation (see equation 3), giving :
+                                                                                     X
+                                                                           Ujt (p) =     Pkt (p) · Gk (Kk ∗ Ati )(p)      (8)
+                                                                                     i,k
+                            (a)                                    Then parameters can be moved along with matter. A ques-
+                                                                tion is how to mix parameters arriving in the same cell. Here
+                                                                we propose two different methods which are respectively av-
+                                                                erage and softmax sampling. The former makes a weighted
+                                                                average of incoming parameters with respect to the quanti-
+                                                                ties of incoming matter and is formally defined as :
+                                                                                                 t 0     0      t 0
+                                                                                       P
+                                                                            t+dt         p0 ∈L A (p )I(p , p)P (p )
+                                                                          P      (p) =    P         t 0     0
+                                                                                                                          (9)
+                                                                                             p0 ∈L A (p )I(p , p)
+
+                                                                   Softmax sampling on the other hand samples a parameter
+             (b)                            (c)
+                                                                in the set of incoming ones following the softmax distribu-
+                                                                tion given by incoming quantities of matter :
+
+                                                                                                    exp(At (x)I(x, p))
+                                                                   P[P t+dt (p) = P t (x)] = P               t 0     0
+                                                                                                 p0 ∈L exp(A (p )I(p , p))
+                                                                                                                          (10)
+                                                                   Intuitively, the more represented set of parameters has a
+                                                                greater probability of being selected in the cell, like simu-
+                                                                lating in one step a competition between different parame-
+             (d)                            (e)                 ters in the cell. Note that we could also sample each ele-
+                                                                ment of the vector of parameters independently giving some
+                                                                crossover mechanism. We can also add mutations in the sim-
+                                                                ulation. For instance, we can, at a given rate, modify param-
+                                                                eters in a randomly sampled zone by adding Gaussian noise
+                                                                to the parameter map.
+                                                                The parameters embedding mechanism allows to run multi-
+                                                                species simulations where all creatures patches are initial-
+                             (f)
+                                                                ized with different parameters as shown in figure 6(a) where
+                                                                colors code for parameters. We can see that the creatures,
+Figure 6: Multi-species simulations. (a) Sample of a            although in the same CA, display different morphologies
+multi-species simulation where color code for parame-           even though they have been initialised with the same pat-
+ters. (b-e) Timelapse of larger scale multi-species sim-        tern. We also ran larger scale simulations (e.g 1024 × 1024
+ulation. World is a 1024 × 1024 grid initialized with           worlds initialized with 144 creatures and simulated for 200k
+144 creatures with distinct parameters represented by col-      timesteps) using parameter embedding as shown in figure
+ors. We simulate 200k timesteps and use softmax sam-            6(b-e). Such a simulation display very interesting dynam-
+pling as the mixing rule and random mutations every 500         ics on the large scale where some “species” can take over
+steps. (f) Timelapse of simulation with parameter embed-        large parts of the world by contaminating other species be-
+ding and food (in blue) showing division events (highlighted    fore reaching more stable states. Also, we can see the emer-
+with boxes). Videos are available at https://sites.             gence of coherent creatures composed of different param-
+google.com/view/flowlenia/videos.                               eters where one of those will compose a sort of membrane
+around a nuclei composed by different parameters (see green         cult task in Lenia as most of the search space corresponds
+and pink creature on bottom left of figure 6(e)). Such a pat-       to either exploding or vanishing patterns. Furthermore, we
+tern can be seen as a form of symbiosis.                            have shown that the update rule parameters can be optimized
+While parameter embedding could lead to the emergence               with simple evolutionary strategies to generate patterns with
+of intrinsic evolutionary processes where parameters would          specific properties and behaviors. Doing so in Lenia is a dif-
+compete for available matter, we can also add intrinsic se-         ficult task since the spatial localization of emergent patterns
+lective pressures in the form of resource collection mecha-         is not guaranteed necessitating more complex algorithms ac-
+nisms bootstrapping evolution. The idea is to add food re-          counting for such a property.
+sources that creatures would need to collect in order to re-        Finally we showed that the Flow Lenia system allowed for
+plenish their own constantly decaying pool of resources. To         the integration of the update rule parameters within the
+do so, we let matter decay at a fixed rate ρdecay , and create      CA dynamics allowing for the coexistence of multiple up-
+a food map Ψ : L → R≥0 . When matter is in a cell where             date rules, and thus different creature or species, within the
+there is also food, then food is transformed into matter at a       same simulation. We argue that such a feature represent
+given rate ρdigest giving the following update.                     an important step towards the design of emergent micro-
+                                                                    cosms (Arbesman, 2022) in which could emerge intrinsic,
+                                       Ψt (x)
+ (
+   At+dt (x) = · · · + [At (x)ρdigest ]0      − At (x)ρdecay        maybe open-ended, evolutionary processes through inter-
+                                          Ψt (x)                    species interactions. Moreover, we also showed that food
+  Ψt+dt (x) = Ψt (x) − [At (x)ρdigest ]0
+                                                            (11)    consumption mechanisms can be implemented in Flow Le-
+Where · · · refers to the update equation 6 and [·]ba is the clip   nia which could act as intrinsic selective pressures in such
+function between a and b. We enable creatures to sense food         settings bootstrapping evolutionary processes though com-
+by adding kernels and growth function from the food map Ψ           petitive dynamics. Whereas environment design is poorly
+to creatures’ channels A.                                           addressed and quite challenging in cellular automata sys-
+By performing simulations with random set of parameters,            tems, we believe that it is crucial to study the emergence of
+parameter embedding and food, we have been able to ob-              agency and cognition in those systems as argued in Godfrey-
+serve interesting patterns. First, we have been able to ob-         Smith (2002) and shown in Hamon et al. (2022). By en-
+serve that some creatures, while not having trained for it,         abling the design of complex environmental features like
+are able to go towards nearby food sources and consume              inter-species interactions, walls, food or temperature, Flow
+it. We can hypothesize that creatures with such a capability        Lenia could represent a particularly interesting system to
+will survive (and grow) while other will not leading to in-         study ecological theories of the evolution of complexity and
+trinsic evolution. Quite interestingly, complex patterns can        cognition (Nisioti et al., 2021).
+emerge from the change of mass induced by decay or food             Lot of exciting roads remain to be taken in order to fully
+consumption. For instance, when growing after eating, some          capture the value of complex self-organized systems such as
+creatures will divide in two identical creatures as shown in        Flow Lenia. A major path to explore is about the detection
+figure 6 (f), crucial pattern for evolution to occur. On the        of agency and cognition in such systems where everything
+other hand, mass decay also leads to interesting dynamics           is emergent with no predefined notion of individuals. Infor-
+where creatures undergo phase transitions, changing their           mation theoretical measures of concepts like individuality,
+shape and behavior, when their mass falls below a certain           autonomy and agency (Krakauer et al., 2020; Bertschinger
+threshold which can lead them to adopt foraging behaviour           et al., 2008; Negru, 2021; Kolchinsky and Wolpert, 2018)
+for example while being initially static.                           could be of great interest in this perspective even though
+                                                                    they remain difficultly applicable in large systems. Demon-
+                         Discussion                                 strating the emergence of intrinsic evolutionary processes
+Due to the mass conservative nature of Flow Lenia, most of          has been left out of the scope of this paper and left for
+patterns do not grow indefinitely into spatially global pat-        future work. However, evaluating such a system appears
+terns (i.e patterns that diffuse on the entire grid also called     as a difficult task. Quantifying intrinsic evolutionary pro-
+Turing-like patterns), therefore SLPs are much more com-            cesses with measures like evolutionary activity (Bedau and
+mon and easier to find. This is an important difference from        Packard, 1996; Droop and Hickinbotham, 2012) could re-
+the previous versions of Lenia, where one needs to search           veal to be useful in order to get a better grasp on the complex
+or evolve for patterns that are both non-vanishing and non-         dynamics taking place in simulations such as the one shown
+exploding, and to constantly monitor their existential sta-         in figure 6. Ultimately, such simulations could be key for the
+tus. Here, the mass conservation constraint acts as a regu-         growth of complexity inside the system and the emergence
+larizer on the kind of patterns that can emerge. Even though        of virtual creatures displaying more complex forms of cog-
+patterns generated by Flow Lenia are often static or slowly         nition.
+moving, we have been able to find creatures with complex
+dynamics from random search only which would be a diffi-
+                         References                                   Moroz,      M.    (2020).            Reintegration     tracking.
+Arbesman, S. (2022). Emergent Microcosms.                                 https://michaelmoroz.github.io/Reintegration-Tracking/.
+
+Bedau, M. A. and Packard, N. H. (1996). Measurement of Evolu-         Negru, T. (2021). Self, Agency and Autonomy in Dynamical Liv-
+    tionary Activity, Teleology, and Life.                                ing Systems. Synthesis philosophica, 36(1):191.
+
+                                                                      Nisioti, E., Jodogne-del Litto, K., and Moulin-Frier, C. (2021).
+Bertschinger, N., Olbrich, E., Ay, N., and Jost, J. (2008). Au-
+                                                                           Grounding an Ecological Theory of Artificial Intelligence in
+     tonomy: An information theoretic perspective. Bio Systems,
+                                                                           Human Evolution. In NeurIPS 2021 - Conference on Neu-
+     91(2):331–345.
+                                                                           ral Information Processing Systems / Workshop: Ecological
+Bradbury, J., Frostig, R., Hawkins, P., Johnson, M. J., Leary,             Theory of Reinforcement Learning, virtual event, France.
+     C., Maclaurin, D., Necula, G., Paszke, A., VanderPlas, J.,
+                                                                      Oros, N. and Nehaniv, C. (2007). Sexyloop: Self-Reproduction,
+     Wanderman-Milne, S., and Zhang, Q. (2018). JAX: Compos-
+                                                                           Evolution and Sex in Cellular Automata.
+     able transformations of Python+NumPy programs.
+                                                                      Rafler, S. (2011). Generalization of Conway’s ”Game of Life” to a
+Chan, B. W.-C. (2019). Lenia - Biology of Artificial Life. Complex         continuous domain - SmoothLife.
+    Systems, 28(3):251–286.
+                                                                      Salimans, T., Ho, J., Chen, X., Sidor, S., and Sutskever, I. (2017).
+Chan, B. W.-C. (2020). Lenia and Expanded Universe. In The 2020            Evolution Strategies as a Scalable Alternative to Reinforce-
+    Conference on Artificial Life, pages 221–229.                          ment Learning. arXiv:1703.03864 [cs, stat].
+Droop, A. and Hickinbotham, S. (2012). A quantitative measure of      Sayama, H. (1999). Toward the realization of an evolving ecosys-
+    non-neutral evolutionary activity for systems that exhibit in-        tem on cellular automata. Proc. Fourth Int. Symp. Artificial
+    trinsic fitness. In ALIFE 2012: The Thirteenth International          Life and Robotics, pages 254–257.
+    Conference on the Synthesis and Simulation of Living Sys-
+    tems, pages 45–52. MIT Press.                                     Stanley, K. O. (2019). Why Open-Endedness Matters. Artificial
+                                                                           Life, 25(3):232–235.
+Froese, T. and Ziemke, T. (2009). Enactive artificial intelligence:
+     Investigating the systemic organization of life and mind. Ar-
+     tificial Intelligence, 173(3):466–500.
+
+Godfrey-Smith, P. (2002). Environmental complexity and the evo-
+     lution of cognition. In The Evolution of Intelligence, pages
+     223–249. Lawrence Erlbaum Associates Publishers, Mah-
+     wah, NJ, US.
+
+Hamon, G., Etcheverry, M., Chan, B. W.-C., Moulin-Frier, C., and
+    Oudeyer, P.-Y. (2022). Learning sensorimotor agency in cel-
+    lular automata.
+
+Hickinbotham, S. and Stepney, S. (2015). Conservation of Matter
+     Increases Evolutionary Activity. In ECAL 2015: The 13th
+     European Conference on Artificial Life, pages 98–105. MIT
+     Press.
+
+Kingma, D. P. and Ba, J. (2017). Adam: A Method for Stochastic
+    Optimization.
+
+Kolchinsky, A. and Wolpert, D. H. (2018). Semantic information,
+     autonomous agency and non-equilibrium statistical physics.
+     Interface Focus, 8(6):20180041.
+
+Krakauer, D., Bertschinger, N., Olbrich, E., Flack, J. C., and Ay,
+     N. (2020). The information theory of individuality. Theory
+     in Biosciences, 139(2):209–223.
+
+Lange, R. T. (2022). Evosax: JAX-based Evolution Strategies.
+
+Lehman, J. and Stanley, K. O. (2011). Novelty Search and the
+    Problem with Objectives. In Riolo, R., Vladislavleva, E.,
+    and Moore, J. H., editors, Genetic Programming Theory and
+    Practice IX, Genetic and Evolutionary Computation, pages
+    37–56. Springer, New York, NY.
+
+Mordvintsev, A., Niklasson, E., and Randazzo, E. (2022). Parti-
+    cle Lenia and the energy-based formulation. https://google-
+    research.github.io/self-organising-systems/particle-lenia/.
+
