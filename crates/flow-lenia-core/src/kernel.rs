@@ -37,8 +37,60 @@
 //! contract recorded in DESIGN.md §4.6.
 //! ──────────────────────────────────────────────────────────────────────
 
-use crate::params::KernelEntry;
+use crate::params::{KernelEntry, KernelParams};
 use ndarray::Array2;
+
+/// Lightweight, plain-old-data metadata for one kernel, suitable for both
+/// the CPU affinity loop and (eventually) a GPU uniform buffer.
+///
+/// Carries only the data the per-kernel inner loop of paper Eq. 3 / Eq. 7
+/// needs *besides the kernel array itself* — the source/target channels
+/// for indexing into `A` and `U`, the growth function `(μ, σ)`, and the
+/// effective radius (kept here so a future per-kernel SIMD/early-exit
+/// optimisation can size its loop without re-deriving `(R+15)·r_i`).
+///
+/// The kernel weight `h_i` is **not** included: in Eq. 3 it is a separate
+/// `&[f32]` argument to the affinity function, and in Eq. 7 it is
+/// superseded by the per-cell map `P_i(x)`.
+///
+/// **M2 reuse**: the field set is intentionally `Copy` and free of
+/// pointers/heap so a future `#[derive(bytemuck::Pod)]` can place it in a
+/// WGPU uniform buffer unchanged. We do *not* derive `Pod` yet — that
+/// decision belongs to M2, where layout/alignment requirements will be
+/// dictated by the compute shader.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct KernelMeta {
+    /// Source channel index (paper `c_i^0`).
+    pub source_channel: u32,
+    /// Target channel index (paper `c_i^1`).
+    pub target_channel: u32,
+    /// Growth function mean (paper Eq. 2 `μ_i`).
+    pub mu: f32,
+    /// Growth function width (paper Eq. 2 `σ_i`).
+    pub sigma: f32,
+    /// Effective radius in cells (`ceil((R+15) · r_i)`, see
+    /// [`effective_radius`]).
+    pub effective_radius: u32,
+}
+
+impl KernelMeta {
+    /// Extract metadata for the `i`-th kernel of `params`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `i >= params.kernels.len()`.
+    #[must_use]
+    pub fn from_params(params: &KernelParams, i: usize) -> Self {
+        let entry = &params.kernels[i];
+        Self {
+            source_channel: entry.c0,
+            target_channel: entry.c1,
+            mu: entry.mu,
+            sigma: entry.sigma,
+            effective_radius: effective_radius(params.r_global, entry.r),
+        }
+    }
+}
 
 /// Effective radius of a kernel in cells, derived from `R` and the per-kernel
 /// scale `r_i` via the JAX rule `er = ⌈(R + 15) · r_i⌉`
@@ -185,6 +237,52 @@ mod tests {
         for x in [0.1_f32, 1.0, 5.0, 10.0] {
             assert_relative_eq!(sigmoid(-x), 1.0 - sigmoid(x), epsilon = 1e-6);
         }
+    }
+
+    /// `KernelMeta::from_params` reads the right fields off the right entry
+    /// and computes `effective_radius` consistently.
+    #[test]
+    fn kernel_meta_from_params_extracts_correct_fields() {
+        let params = KernelParams {
+            r_global: 10.0,
+            kernels: vec![
+                KernelEntry {
+                    c0: 0,
+                    c1: 1,
+                    r: 0.5,
+                    a: [0.25, 0.5, 0.75],
+                    b: [1.0, 0.7, 0.4],
+                    w: [0.05, 0.05, 0.05],
+                    h: 1.0,
+                    mu: 0.15,
+                    sigma: 0.02,
+                },
+                KernelEntry {
+                    c0: 2,
+                    c1: 0,
+                    r: 0.8,
+                    a: [0.1, 0.3, 0.6],
+                    b: [0.5, 0.5, 0.5],
+                    w: [0.1, 0.1, 0.1],
+                    h: 0.7,
+                    mu: 0.25,
+                    sigma: 0.04,
+                },
+            ],
+        };
+        let m0 = KernelMeta::from_params(&params, 0);
+        assert_eq!(m0.source_channel, 0);
+        assert_eq!(m0.target_channel, 1);
+        assert_relative_eq!(m0.mu, 0.15, epsilon = 1e-6);
+        assert_relative_eq!(m0.sigma, 0.02, epsilon = 1e-6);
+        // (10 + 15) · 0.5 = 12.5 → ceil = 13.
+        assert_eq!(m0.effective_radius, 13);
+
+        let m1 = KernelMeta::from_params(&params, 1);
+        assert_eq!(m1.source_channel, 2);
+        assert_eq!(m1.target_channel, 0);
+        // (10 + 15) · 0.8 = 20.0 → ceil = 20.
+        assert_eq!(m1.effective_radius, 20);
     }
 
     /// `effective_radius` follows JAX's `ceil((R+15) · r_i)` rule.

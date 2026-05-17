@@ -23,6 +23,14 @@ pub type ActivationField = Array3<f32>;
 /// In JAX-compat (default) mode each channel has its own α value.
 pub type AlphaField = Array3<f32>;
 
+/// 3D affinity field `U`. Shape `(H, W, C)`. Paper symbol: `U`.
+///
+/// Computed per paper Eq. 3 (constant weights `h_i`) or Eq. 7 (cell-local
+/// weights `P_i(x)`) — see [`crate::affinity`]. JAX cross-reference:
+/// `flowlenia.py:90` builds `U: (X, Y, C)` by grouping per-kernel growth
+/// outputs by target channel `c_i^1`.
+pub type UField = Array3<f32>;
+
 /// Height (row) axis of any `(H, W, …)` field.
 pub const AXIS_H: Axis = Axis(0);
 /// Width (column) axis of any `(H, W, …)` field.
