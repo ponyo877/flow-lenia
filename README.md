@@ -1,0 +1,76 @@
+# flow-lenia
+
+Rust + WebAssembly + WebGPU reimplementation of **Flow-Lenia**
+(Plantec et al. 2025, *Artificial Life journal*,
+[arXiv:2506.08569v1](https://arxiv.org/abs/2506.08569)).
+
+Educational and research-quality reproduction of the 2025 paper's mass-conservative
+continuous cellular automaton, with both a CPU reference implementation and a
+WebGPU compute pipeline target. Multi-species (Eq. 7/8 parameter embedding) and
+mutation beams are supported in later milestones.
+
+## Documents
+
+- [`DESIGN.md`](DESIGN.md) — Authoritative design specification (currently **Rev. 4**)
+- [`references/JAX_NOTES.md`](references/JAX_NOTES.md) — Annotated reading of the
+  official JAX implementation (`erwanplantec/FlowLenia`, commit `dce428c`)
+- [`JAX_NOTES.md`](JAX_NOTES.md) — Symlink to the above for convenient access from
+  the workspace root
+- `papers/` — Source PDFs (2025 + 2023 Flow-Lenia, Lenia 2019)
+- `references/FlowLenia-jax/` — Read-only JAX reference (excluded from the repo via
+  `.gitignore` because the upstream lacks an explicit license file). To reproduce
+  the exact source consulted by `references/JAX_NOTES.md`:
+
+  ```sh
+  git clone https://github.com/erwanplantec/FlowLenia.git references/FlowLenia-jax
+  cd references/FlowLenia-jax && git checkout dce428c6b0c5079a06e5606fb7b5ac1fe1323bc5
+  ```
+
+## Workspace layout
+
+| Crate | Purpose | Status |
+|---|---|---|
+| `crates/flow-lenia-core/` | Platform-independent CA logic and CPU reference | M1.1 skeleton |
+| `crates/flow-lenia-gpu/` | wgpu compute pipeline | M1.1 skeleton |
+| `crates/flow-lenia-ui/` | egui controls / statistics panels | M1.1 skeleton |
+| `crates/flow-lenia-app/` | Native binaries (`native_cpu`, `native_gpu`) | M1.1 skeleton |
+
+## Build / Run
+
+```sh
+# Verify the workspace compiles
+cargo check --workspace
+
+# Run the (placeholder) native CPU binary
+cargo run -p flow-lenia-app --bin native_cpu
+
+# Run the (placeholder) native GPU binary
+cargo run -p flow-lenia-app --bin native_gpu
+```
+
+Toolchain: Rust **1.76.0** stable (pinned via `rust-toolchain.toml`).
+
+## Milestone status
+
+- [x] **M1.1** — Project skeleton
+- [ ] **M1.2** — Common type definitions (`FlowLeniaConfig`, mode enums, `KernelParams`)
+- [ ] **M1.3** — Parameter sampling (JAX `flowlenia.py:55-64` ranges)
+- [ ] **M1.4** — Kernel generation (JAX form, paper Eq. 1 mapped)
+- [ ] **M1.5** — Growth function `G_i` (paper Eq. 2)
+- [ ] **M1.6** — Direct convolution (CPU, torus/wall, per-kernel radius)
+- [ ] **M1.7** — Sobel filter (no normalization, JAX `utils.py:16-37`)
+- [ ] **M1.8** — α computation (both modes per `DESIGN.md` §4.1.5)
+- [ ] **M1.9** — Flow `F` (paper Eq. 5)
+- [ ] **M1.10** — Overlap area (with `min(1, 2σ)` clip per JAX `utils.py:57-58`)
+- [ ] **M1.11** — Reintegration tracking (paper Eq. 6, 11×11 neighborhood)
+- [ ] **M1.12** — Affinity `U` with parameter embedding (paper Eq. 7)
+- [ ] **M1.13** — One-step integration
+- [ ] **M1.14** — Terminal visualization
+- [ ] **M1.15** — Mass conservation across all mode combinations
+- [ ] **M2.1–M2.11** — GPU pipeline
+
+See `DESIGN.md` §8 for milestone definitions and completion criteria.
+
+## License
+
+Dual-licensed under either Apache-2.0 or MIT, at your option.

@@ -1,0 +1,28 @@
+[package]
+name = "flow-lenia-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "native_cpu"
+path = "src/bin/native_cpu.rs"
+
+[[bin]]
+name = "native_gpu"
+path = "src/bin/native_gpu.rs"
+
+[dependencies]
+flow-lenia-core.workspace = true
+flow-lenia-gpu.workspace = true
+flow-lenia-ui.workspace = true
+winit.workspace = true
+pollster.workspace = true
+env_logger.workspace = true
+log.workspace = true

@@ -46,3 +46,6 @@ flamegraph.svg
 
 # ローカル設定
 .claude/settings.local.json
+
+# JAX reference repo (LICENSE 不明のためローカルのみ。再取得手順は README 参照)
+/references/FlowLenia-jax/

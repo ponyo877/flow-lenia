@@ -1,0 +1,4 @@
+# Clippy configuration thresholds (lint enablement is in Cargo.toml
+# [workspace.lints.clippy], per DESIGN.md §1.1).
+#
+# Add per-lint thresholds here as the codebase grows.
