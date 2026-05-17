@@ -258,14 +258,34 @@ mod tests {
     /// **f32 read-back floor** — explicitly documents the noise floor a
     /// downstream caller will see if they do `K.iter().sum::<f32>()`.
     ///
-    /// Failing this test would mean either:
-    /// (a) the floor improved unexpectedly (which suggests a measurement
-    ///     artifact — investigate), or
-    /// (b) it got *worse* and there's a real regression in `compute_kernel`.
+    /// **Floor: `5e-6`**
     ///
-    /// The 5e-6 bound is the measured worst case (3.58e-6 at the 81×81
-    /// corner, see `diagnose_normalization_error_by_size`) with a small
-    /// margin for build-to-build f32 variation.
+    /// **Justification**: empirically measured ≈ 3.58e-6 in the worst case
+    /// (81×81 kernel, R=25, r=1.0) with `ndarray::Array2::sum`'s current
+    /// 8-way unrolled fold (`numeric_util::unrolled_fold`). `5e-6` gives
+    /// ≈ 1.4× headroom over the measurement, which is enough to absorb
+    /// the build-to-build f32 jitter we have observed without inviting a
+    /// regression to go undetected. See
+    /// `diagnose_normalization_error_by_size` for the measurement harness.
+    ///
+    /// **If this test fails without code changes**, suspect (in order):
+    ///   1. `ndarray` summation algorithm change (a release that switched
+    ///      `unrolled_fold` factor or reduction order).
+    ///   2. Toolchain f32 codegen change — LLVM/rustc update altering
+    ///      vectorisation or FMA emission for `sum::<f32>`.
+    ///   3. Architecture-specific behaviour — currently verified on
+    ///      `aarch64-apple-darwin`. x86_64 with different `target-feature`
+    ///      flags may differ by a few ulps.
+    ///
+    /// **For bit-identical JAX reproduction** (M6 stretch goal): implement
+    /// NumPy's tree-pairwise summation here instead of leaning on
+    /// `iter().sum()`. The order-of-magnitude floor stays the same; the
+    /// per-result residual becomes deterministic vs NumPy.
+    ///
+    /// Failing this test means either (a) the floor improved unexpectedly
+    /// (suggesting a measurement artifact — investigate before tightening),
+    /// or (b) it got *worse* and there is a real regression in
+    /// `compute_kernel`'s f64 promotion.
     #[test]
     fn kernel_f32_sum_residual_stays_below_floor() {
         for (r_global, r_i) in [(2.0_f32, 1.0_f32), (25.0, 1.0)] {

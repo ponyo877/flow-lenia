@@ -8,9 +8,12 @@
 //! Contents are populated incrementally from M1.2 onwards.
 
 pub mod config;
+pub mod growth;
 pub mod kernel;
 pub mod params;
 
 pub use config::{BorderMode, FlowLeniaConfig, MixRule};
 pub use kernel::{compute_kernel, effective_radius, sigmoid};
 pub use params::{KernelEntry, KernelParams, SamplingSettings};
+// `growth::growth` would shadow the module name when re-exported, so
+// callers use `flow_lenia_core::growth::{bell, growth}` directly.
