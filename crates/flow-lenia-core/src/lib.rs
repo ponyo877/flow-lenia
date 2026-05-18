@@ -19,6 +19,7 @@ pub mod params;
 pub mod reintegrate;
 pub mod sobel;
 pub mod state;
+pub mod step;
 
 pub use affinity::{affinity_with_constant_weights, affinity_with_localized_weights};
 pub use alpha::alpha;
@@ -34,5 +35,6 @@ pub use state::{
     sum_channels, ActivationField, AlphaField, FlowField, FlowFieldExt, UField, AXIS_C, AXIS_FLOW,
     AXIS_H, AXIS_W, FLOW_DX, FLOW_DY,
 };
+pub use step::{step, WeightsRef};
 // `growth::growth` would shadow the module name when re-exported, so
 // callers use `flow_lenia_core::growth::{bell, growth}` directly.
