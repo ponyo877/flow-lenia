@@ -57,6 +57,26 @@ cargo run --release --bin native_gpu -- [steps_per_frame=1] [seed=1729]
 cargo run --release --bin bench_step
 ```
 
+### Web build (M3.5 — Chrome WebGPU)
+
+```sh
+# Build + serve crates/flow-lenia-web at http://localhost:8080/
+cd crates/flow-lenia-web && trunk serve
+```
+
+Requires a WebGPU-capable browser. Chrome stable (148+) is the reference
+target — see [`BROWSER_COMPAT.md`](BROWSER_COMPAT.md) for measured behaviour
+on Chrome and the current status of Safari / Firefox.
+
+Keyboard (same as the native binary):
+
+| Key       | Action                                                                   |
+| --------- | ------------------------------------------------------------------------ |
+| `Space`   | Toggle running. Pause freezes the step counter; redraw continues.        |
+| `r` / `R` | Reset the pipeline from `seed=1729` (verifies determinism).              |
+| `q` / `Q` | `event_loop.exit()`. Canvas freezes at the last frame; the tab stays    |
+|           | open (WASM cannot close a browser tab without a user gesture).           |
+
 Toolchain: Rust **1.87.0** stable (pinned via `rust-toolchain.toml`).
 
 ## Milestone status
@@ -87,7 +107,12 @@ Toolchain: Rust **1.87.0** stable (pinned via `rust-toolchain.toml`).
 - [x] **M2.9** — Visualisation render pass (storage buffer → sRGB target)
 - [x] **M2.10** — Native binary with winit event loop + keyboard control
 - [x] **M2.11** — Performance benchmarks ([BENCH.md](BENCH.md))
-- [ ] **M3.1–M3.x** — WASM build + browser WebGPU
+- [x] **M3.1** — `wasm32-unknown-unknown` build green
+- [x] **M3.2** — Hello WebGPU in Chrome (blue-screen baseline)
+- [x] **M3.3** — Convolve pass through `wgpu` on the browser
+- [x] **M3.4** — Full pipeline animation in the canvas
+- [x] **M3.5** — Chrome stability + keyboard verify
+  ([BROWSER_COMPAT.md](BROWSER_COMPAT.md)); Safari / Firefox pending M5 deploy
 
 See `DESIGN.md` §8 for milestone definitions and completion criteria.
 

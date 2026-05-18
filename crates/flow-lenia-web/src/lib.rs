@@ -60,6 +60,12 @@ use winit::platform::web::WindowAttributesExtWebSys;
 use winit::window::{Window, WindowId};
 
 const CANVAS_ID: &str = "flow-lenia-canvas";
+// Canvas CSS size in logical pixels. Hard-coded for M3 — M4 UI work
+// will turn these into a resizable / grid-size-tunable value, at
+// which point the `<= 1` fallback heuristic in
+// `resolve_physical_canvas_size` also needs revisiting (it currently
+// assumes "tiny reading = winit init race", which only holds while
+// the displayed canvas is locked to these constants).
 const CANVAS_W: u32 = 512;
 const CANVAS_H: u32 = 512;
 const GRID_W: u32 = 64;
@@ -263,6 +269,47 @@ impl ApplicationHandler<AppEvent> for App {
     }
 }
 
+/// Resolve the canvas's physical pixel size at this moment.
+///
+/// Why this exists: on winit/web `window.inner_size()` can briefly
+/// return `(1, 1)` before the canvas CSS layout settles (caught during
+/// M3.5 stability testing on a backgrounded tab — the surface then
+/// sticks at 1×1, the visualize `upscale = surface_w / GRID_W` rounds
+/// down to 0, and `VisualizePass::new`'s `assert!(upscale > 0)` fires).
+///
+/// We treat any reading where either dimension is `<= 1` as the
+/// init-time race and fall back to `CANVAS_W/H × devicePixelRatio` —
+/// the size the canvas will end up at once layout settles. The
+/// `WindowEvent::Resized` handler still reconfigures the surface on
+/// later genuine resizes, so a real (e.g. user-driven) tiny resize
+/// would still be respected in subsequent frames.
+///
+/// TODO(M4): when UI introduces a resizable canvas or a grid-size
+/// dropdown, the `<= 1` heuristic and the `CANVAS_W/H` constants both
+/// become dynamic. Revisit this helper at that point — it currently
+/// assumes the displayed canvas is locked to those compile-time sizes.
+fn resolve_physical_canvas_size(window: &Window) -> (u32, u32) {
+    let raw = window.inner_size();
+    if raw.width <= 1 || raw.height <= 1 {
+        let dpr = web_sys::window()
+            .map(|w| w.device_pixel_ratio())
+            .unwrap_or(1.0);
+        let expected_w = ((f64::from(CANVAS_W) * dpr).round() as u32).max(1);
+        let expected_h = ((f64::from(CANVAS_H) * dpr).round() as u32).max(1);
+        log::warn!(
+            "window.inner_size() = {}x{} (init race); falling back to dpr-based {}x{} (dpr={})",
+            raw.width,
+            raw.height,
+            expected_w,
+            expected_h,
+            dpr
+        );
+        (expected_w, expected_h)
+    } else {
+        (raw.width, raw.height)
+    }
+}
+
 async fn build_app_state(window: Arc<Window>) -> AppState {
     // ─── wgpu context bound to the canvas surface ─────────────────
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
@@ -282,12 +329,12 @@ async fn build_app_state(window: Arc<Window>) -> AppState {
         .copied()
         .find(wgpu::TextureFormat::is_srgb)
         .unwrap_or(caps.formats[0]);
-    let size = window.inner_size();
+    let (physical_w, physical_h) = resolve_physical_canvas_size(&window);
     let surface_config = wgpu::SurfaceConfiguration {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         format,
-        width: size.width.max(1),
-        height: size.height.max(1),
+        width: physical_w,
+        height: physical_h,
         present_mode: caps.present_modes[0],
         desired_maximum_frame_latency: 2,
         alpha_mode: caps.alpha_modes[0],
@@ -308,11 +355,14 @@ async fn build_app_state(window: Arc<Window>) -> AppState {
     let pipeline = GpuStepPipeline::new(&gpu, &cfg, &kernel_params, &initial_a);
 
     // ─── Visualize pass ────────────────────────────────────────────
-    // `upscale` is the surface-pixel-to-grid ratio. The surface is
-    // sized in physical pixels (CSS width × DPR = 1024 on a 2× HiDPI
-    // canvas); the grid is 64. So upscale = surface_w / GRID_W.
-    let upscale = surface_config.width / GRID_W;
-    log::info!("visualize upscale = {upscale}");
+    // `upscale` is the surface-pixel-to-grid ratio. We derive it from
+    // the same `resolve_physical_canvas_size` helper as the surface
+    // itself, so the two are guaranteed to agree even when the helper
+    // takes the dpr-based fallback path (a `surface_config.width / 64`
+    // computation would otherwise round to 0 during the 1×1 init race
+    // and panic in `VisualizePass::new`'s `assert!(upscale > 0)`).
+    let upscale = (physical_w / GRID_W).max(1);
+    log::info!("visualize upscale = {upscale} (physical canvas = {physical_w}x{physical_h})");
     let visualize = VisualizePass::new(&gpu, format, upscale);
     let visualize_globals_buf = visualize.upload_globals(&gpu, GRID_H, GRID_W, cfg.channels);
     // Pre-build a bind group for each of the two ping-pong A buffers.
