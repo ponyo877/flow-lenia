@@ -1,10 +1,18 @@
-# Flow-Lenia WebGPU Visualizer — 設計書 (Rev. 4.3)
+# Flow-Lenia WebGPU Visualizer — 設計書 (Rev. 4.4)
 
 本書は Rust + WebAssembly + WebGPU で **Flow-Lenia (Plantec et al., 2025, Artificial Life journal, arXiv:2506.08569v1)** を厳密に再現し、ブラウザ上でリアルタイム可視化する実装の設計書である。
 
 **実装の正典**は `papers/2506.08569v1.pdf` (2025年版) であり、Equation 番号は同論文を指す。副参照として `papers/2212.07906v2.pdf` (2023年版)、Moroz, 2020 "Reintegration tracking"、**公式 JAX 実装** `references/FlowLenia-jax/` (commit `dce428c`, 2024-02-08) を用いる。JAX 実装の精読結果は `references/JAX_NOTES.md` を参照。
 
 ## Rev. 履歴
+
+### Rev.4.4 (2026-05、M4.1 着手前の rust-toolchain 上げ)
+
+- **`rust-toolchain.toml` の channel pin を `1.87.0` → `1.95.0`** (M4.0.6)。理由: M4.1 で採用予定の `egui 0.34.2` (+ transitive `epaint`, `vello_cpu`) が MSRV 1.92 を要求、Rev.4.1 で採用した 1.87 ではビルド不可。1.95.0 は 2026-05 時点の Rust stable 最新版
+- **§1.1 (Rust toolchain) と §1.2 (wgpu / wasm 関連) の表記**を 1.95.0 へ追従
+- **M1.15 fixture は再生成不要**: rustc 1.87 → 1.95 で `m1_regression_matches_baseline_fixtures` が **bit-identical** で通った (CPU 参照実装の直接畳み込み + reintegration が LLVM 最適化レベルで同じ命令列に落ちている)。manifest.json の "rustc 1.87" 表記は据え置き — 1.95 でも同じ bit パターンを再現できることが反証検証で示された
+- **回帰テスト結果**: cargo test --workspace --release で 138 tests 全 pass / 3 ignored、M2.8 GPU 比較も bit-identical 維持、clippy clean。native_gpu 5374 step / 42-43 fps、Chrome WebGPU で creature 表示確認 (M4.0.5 と同じ same-seed リング creature を再現)
+- **wasm-opt 適用問題**: M4.0.6 で trunk release build の wasm が 2.7 MB と判明。M3.5 報告の 515 KB は wasm-opt 適用後の値で、trunk 0.21.14 が wasm-opt をデフォルトで呼ばないことを確認。サイズ最適化は M4 完了後 / デプロイ前 (M5 後) で集中対応
 
 ### Rev.4.3 (2026-05、M4 着手前の依存版上げ)
 
@@ -107,15 +115,13 @@
 ### 1.1 Rust toolchain
 
 - **edition: 2021** (2024 は依存クレートとの互換性を理由に保留)
-- **toolchain: stable 1.87.0** で pin
-  - 当初 1.76 を検討したが、transitive 依存 (`indexmap 2.14+` 等) が
-    `edition = "2024"` を要求しており、これは Rust 1.85+ で stable 化された
-    cargo 機能のため、1.76 では cargo check が通らない
-  - 1.87 を採用する理由:
-    - edition 2024 を要求する transitive 依存への対応 (現在 + 将来)
-    - 将来 wgpu 29 系へ移行する選択肢を残す (wgpu 29 の MSRV = 1.87)
-    - 2025-05 リリースで1年経過、十分 stable
-- `rust-toolchain.toml` をリポジトリに置き、コンポーネント `rustfmt`, `clippy`, `rust-src` を指定
+- **toolchain: stable 1.95.0** で pin (Rev.4.4 で 1.87.0 → 1.95.0)
+  - 1.87 を選んだ Rev.4.1 当時の理由 (edition 2024 transitive 依存、wgpu 29 の MSRV) は変わらず満たされる
+  - Rev.4.4 で 1.95 へ更新した理由:
+    - M4.1 で採用する `egui 0.34.2` (および transitive `epaint` / `vello_cpu`) が MSRV 1.92 を要求、1.87 では cargo check が通らない
+    - 1.95.0 は 2026-05 時点の stable 最新版で十分 stable
+  - 反証検証: rustc 1.87 → 1.95 で M1.15 baseline fixture は **bit-identical** で通った。CPU 参照実装が直接畳み込み中心で LLVM 最適化に左右されにくいため
+- `rust-toolchain.toml` をリポジトリに置き、コンポーネント `rustfmt`, `clippy`, `rust-src` を指定。channel は具体的なパッチバージョン (例: `1.95.0`) で pin して `stable` rolling channel は使わない (M1 fixture の bit-identical 再現性のため)
 - nightly 不要
 
 ### 1.2 wgpu / wasm 関連バージョン
@@ -131,7 +137,7 @@
 
 | crate | バージョン | 用途 |
 |---|---|---|
-| `wgpu` | `29` | GPU API (MSRV 1.87、Rev.4.3 で 25 → 29) |
+| `wgpu` | `29` | GPU API (MSRV 1.87、Rev.4.3 で 25 → 29、ただし Rev.4.4 で toolchain 自体は 1.95 に追従) |
 | `winit` | `=0.30.13` (`egui-winit 0.34.x` の optional dep) | ネイティブウィンドウ |
 | `wasm-bindgen` | `=0.2.x` | WASM ⇄ JS 境界 |
 | `web-sys` | `=0.3.x` | DOM / Canvas / WebGPU 型 |

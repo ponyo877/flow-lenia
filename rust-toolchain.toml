@@ -1,5 +1,12 @@
 [toolchain]
-channel = "1.87.0"
+# M4.0.6 (2026-05): bumped 1.87.0 → 1.95.0 because egui 0.34.2 (the
+# M4.1 UI dependency) and its `epaint` / `vello_cpu` font-rendering
+# stack require rustc 1.92+. We pin to a specific patch (not the
+# rolling `stable` channel) so M1.15 fixture re-generation stays
+# reproducible — the LLVM behind 1.95 may schedule floating-point
+# ops differently than 1.87, so the M1 baseline is regenerated on
+# the new toolchain and is no longer bit-identical with the old one.
+channel = "1.95.0"
 components = ["rustfmt", "clippy", "rust-src"]
 # `wasm32-unknown-unknown` is added explicitly (rather than relying on
 # a one-shot `rustup target add`) so the M3 WASM build is reproducible
