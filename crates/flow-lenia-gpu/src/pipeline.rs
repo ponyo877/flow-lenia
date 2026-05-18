@@ -343,6 +343,30 @@ impl GpuStepPipeline {
         &self.a_buffers[self.ping]
     }
 
+    /// Borrow one of the two ping-pong A buffers by index (0 or 1).
+    /// Lets downstream code pre-build a `[BindGroup; 2]` pair indexed
+    /// by [`ping_index`](Self::ping_index) so no per-frame bind-group
+    /// rebuild is needed when running the visualisation pass on top
+    /// of the simulator. Callers should panic on `index >= 2`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index >= 2`.
+    #[must_use]
+    pub fn a_buffer(&self, index: usize) -> &wgpu::Buffer {
+        &self.a_buffers[index]
+    }
+
+    /// Current ping-pong index — `0` or `1`. Equal to the index of
+    /// the buffer returned by [`current_activation_buffer`](Self::current_activation_buffer)
+    /// and (after each `step`) the buffer that holds the *latest*
+    /// activation. Pair with [`a_buffer`](Self::a_buffer) to pick the
+    /// right pre-built bind group each frame.
+    #[must_use]
+    pub fn ping_index(&self) -> usize {
+        self.ping
+    }
+
     /// Copy the current activation buffer back to the CPU as a fresh
     /// `(H, W, C)` `ActivationField`.
     #[must_use]
