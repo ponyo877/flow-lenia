@@ -20,8 +20,18 @@ struct Globals {
     k: u32,
     max_side: u32,
     half_side: u32,
-    border: u32,    // 0 = Torus, 1 = Wall
-    _pad: u32,      // reserved (M2.6 may use for paper_strict flag)
+    border: u32,          // 0 = Torus, 1 = Wall
+    paper_strict: u32,    // 0 = JAX-compat, 1 = paper Eq. 5 (M2.6)
+    beta_a: f32,          // critical mass β_A (paper Eq. 5; M2.6)
+    n: f32,               // α exponent (paper Eq. 5; M2.6)
+    // 24 bytes of padding so the struct is 64 bytes total (a
+    // 16-byte multiple, as the uniform layout rule demands).
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+    _pad3: u32,
+    _pad4: u32,
+    _pad5: u32,
 };
 
 const BORDER_TORUS: u32 = 0u;

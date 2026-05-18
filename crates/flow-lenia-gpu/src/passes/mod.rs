@@ -9,6 +9,7 @@
 
 pub mod affinity_growth;
 pub mod convolve;
+pub mod flow;
 pub mod gradient;
 
 pub use affinity_growth::{
@@ -16,4 +17,5 @@ pub use affinity_growth::{
     MAX_KERNELS,
 };
 pub use convolve::ConvolvePass;
+pub use flow::FlowPass;
 pub use gradient::GradientPass;
