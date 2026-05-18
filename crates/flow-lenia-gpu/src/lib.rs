@@ -24,7 +24,10 @@ pub use globals::GpuGlobals;
 pub use kernel_buffers::{
     readback_kernels, readback_meta, upload_kernels, GpuKernelBuffers, GpuKernelMeta,
 };
-pub use passes::ConvolvePass;
+pub use passes::{
+    upload_constant_weights, upload_localized_weights, AffinityGrowthPass, ConvolvePass,
+    GpuConstantWeights, MAX_KERNELS,
+};
 pub use readback::readback_buffer;
 
 /// Owns the four core `wgpu` handles the rest of the crate (and the

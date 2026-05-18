@@ -7,6 +7,11 @@
 //! and synchronisation visible at the M2.10 simulator loop, instead
 //! of being hidden inside each pass.
 
+pub mod affinity_growth;
 pub mod convolve;
 
+pub use affinity_growth::{
+    upload_constant_weights, upload_localized_weights, AffinityGrowthPass, GpuConstantWeights,
+    MAX_KERNELS,
+};
 pub use convolve::ConvolvePass;

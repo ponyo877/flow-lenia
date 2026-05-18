@@ -37,11 +37,19 @@ impl ConvolvePass {
     /// step.
     #[must_use]
     pub fn new(ctx: &GpuContext) -> Self {
+        // `types.wgsl` defines `Meta`, `Globals`, the border constants
+        // and `growth_fn`. We prepend it to the per-pass shader source
+        // at build time because WGSL has no native include directive.
+        const SOURCE: &str = concat!(
+            include_str!("../shaders/types.wgsl"),
+            "\n",
+            include_str!("../shaders/convolve.wgsl"),
+        );
         let shader = ctx
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("convolve.wgsl"),
-                source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/convolve.wgsl").into()),
+                source: wgpu::ShaderSource::Wgsl(SOURCE.into()),
             });
 
         let bind_group_layout =

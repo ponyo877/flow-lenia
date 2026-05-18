@@ -1,4 +1,4 @@
-// Flow-Lenia convolve compute shader (M2.3)
+// Flow-Lenia convolve compute shader (M2.3, refactored in M2.4)
 //
 // Computes the per-(cell, kernel) convolution that feeds M2.4's
 // growth-and-aggregation pass:
@@ -25,27 +25,9 @@
 // Rationale (M2.3 design judgment): K varies per `cfg.num_kernels`
 // without pipeline rebuild; bind-group management is simpler; WGSL
 // compiles the inner K loop tightly. M6 may revisit if K dominates.
-
-struct Meta {
-    source_channel: u32,
-    target_channel: u32,
-    mu: f32,
-    sigma: f32,
-};
-
-struct Globals {
-    h: u32,
-    w: u32,
-    c: u32,
-    k: u32,
-    max_side: u32,
-    half_side: u32,
-    border: u32,    // 0 = Torus, 1 = Wall
-    _pad: u32,
-};
-
-const BORDER_TORUS: u32 = 0u;
-const BORDER_WALL: u32 = 1u;
+//
+// NOTE: `Meta`, `Globals`, and the `BORDER_*` constants come from
+// `types.wgsl`, prepended at pipeline build time.
 
 @group(0) @binding(0) var<storage, read>       a_in:      array<f32>;
 @group(0) @binding(1) var<storage, read>       kernels:   array<f32>;
