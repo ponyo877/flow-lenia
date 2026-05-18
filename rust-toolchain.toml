@@ -1,4 +1,8 @@
 [toolchain]
 channel = "1.87.0"
 components = ["rustfmt", "clippy", "rust-src"]
+# `wasm32-unknown-unknown` is added explicitly (rather than relying on
+# a one-shot `rustup target add`) so the M3 WASM build is reproducible
+# across machines and in CI without an extra setup step.
+targets = ["wasm32-unknown-unknown"]
 profile = "minimal"

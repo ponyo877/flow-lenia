@@ -16,5 +16,15 @@ rand.workspace = true
 rand_chacha.workspace = true
 bytemuck.workspace = true
 
+# `getrandom` is a transitive dependency of `rand` and refuses to
+# build for `wasm32-unknown-unknown` without an explicit backend
+# feature. The "js" feature wires it up to the browser's
+# `crypto.getRandomValues`. Listed as a direct dep so the feature
+# flag is honoured (Cargo unification only respects flags from
+# direct deps for transitive crates).
+# Native builds are unaffected — this entry is target-gated.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+
 [dev-dependencies]
 approx.workspace = true
