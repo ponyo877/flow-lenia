@@ -11,7 +11,9 @@ mutation beams are supported in later milestones.
 
 ## Documents
 
-- [`DESIGN.md`](DESIGN.md) — Authoritative design specification (currently **Rev. 4**)
+- [`DESIGN.md`](DESIGN.md) — Authoritative design specification (currently **Rev. 4.1**)
+- [`BENCH.md`](BENCH.md) — Measured CPU vs GPU per-step times, per-pass
+  breakdown, init time, GPU memory (as of M2.11)
 - [`references/JAX_NOTES.md`](references/JAX_NOTES.md) — Annotated reading of the
   official JAX implementation (`erwanplantec/FlowLenia`, commit `dce428c`)
 - [`JAX_NOTES.md`](JAX_NOTES.md) — Symlink to the above for convenient access from
@@ -30,10 +32,10 @@ mutation beams are supported in later milestones.
 
 | Crate | Purpose | Status |
 |---|---|---|
-| `crates/flow-lenia-core/` | Platform-independent CA logic and CPU reference | M1 complete |
-| `crates/flow-lenia-gpu/` | wgpu compute pipeline | M1.1 skeleton |
+| `crates/flow-lenia-core/` | Platform-independent CA logic and CPU reference | **M1 complete** |
+| `crates/flow-lenia-gpu/` | wgpu compute pipeline | **M2 complete** |
 | `crates/flow-lenia-ui/` | egui controls / statistics panels | M1.1 skeleton |
-| `crates/flow-lenia-app/` | Native binaries (`native_cpu`, `native_gpu`, `generate_m1_fixtures`) | M1.14 native_cpu live |
+| `crates/flow-lenia-app/` | Native binaries (`native_cpu`, `native_gpu`, `bench_step`, `generate_m1_fixtures`) | **M2 complete** |
 
 ## Build / Run
 
@@ -41,11 +43,18 @@ mutation beams are supported in later milestones.
 # Verify the workspace compiles
 cargo check --workspace
 
-# Run the (placeholder) native CPU binary
-cargo run -p flow-lenia-app --bin native_cpu
+# Run all tests (release; the integration tests are GPU-touching)
+cargo test --release --workspace
 
-# Run the (placeholder) native GPU binary
-cargo run -p flow-lenia-app --bin native_gpu
+# Native CPU reference — ANSI terminal animation (M1.14)
+cargo run --release --bin native_cpu -- [seed] [steps] [render_every]
+
+# Native GPU — 512×512 winit window with real-time Flow-Lenia (M2.10)
+#   Space: pause / resume    r: reset to seed    q: quit
+cargo run --release --bin native_gpu -- [steps_per_frame=1] [seed=1729]
+
+# Per-step benchmark — CPU vs GPU across grid sizes (M2.11)
+cargo run --release --bin bench_step
 ```
 
 Toolchain: Rust **1.87.0** stable (pinned via `rust-toolchain.toml`).
@@ -67,9 +76,31 @@ Toolchain: Rust **1.87.0** stable (pinned via `rust-toolchain.toml`).
 - [x] **M1.13** — One-step integration
 - [x] **M1.14** — Terminal visualization
 - [x] **M1.15** — Mass conservation across all mode combinations
-- [ ] **M2.1–M2.11** — GPU pipeline
+- [x] **M2.1** — wgpu init + winit blue-screen baseline
+- [x] **M2.2** — Kernel-bank GPU buffer upload (Plan A: fixed stride, zero-pad)
+- [x] **M2.3** — Convolve compute shader (`pre_g = K_i ∗ A_{c_i^0}`)
+- [x] **M2.4** — Affinity-growth compute shader (paper Eq. 3 + Eq. 7)
+- [x] **M2.5** — Gradient shaders (`∇U` per-channel, `∇A_Σ` on-the-fly)
+- [x] **M2.6** — Flow shader (combined α + F per paper Eq. 5, both modes)
+- [x] **M2.7** — Reintegration tracking (paper Eq. 6, dd-neighbourhood loop)
+- [x] **M2.8** — `GpuStepPipeline` full step + M1.15 fixture regression
+- [x] **M2.9** — Visualisation render pass (storage buffer → sRGB target)
+- [x] **M2.10** — Native binary with winit event loop + keyboard control
+- [x] **M2.11** — Performance benchmarks ([BENCH.md](BENCH.md))
+- [ ] **M3.1–M3.x** — WASM build + browser WebGPU
 
 See `DESIGN.md` §8 for milestone definitions and completion criteria.
+
+## M2 completion evidence
+
+| DESIGN.md §8 criterion | Evidence |
+|---|---|
+| All 6 compute passes + visualize | `crates/flow-lenia-gpu/src/passes/{convolve, affinity_growth, gradient, flow, reintegrate, visualize}.rs` |
+| Reference vs GPU agreement (single-step) | `pipeline::tests::gpu_pipeline_*_matches_cpu` (M2.8) — `rel < 1e-4 OR abs < 1e-5` |
+| Mass conservation (32×32, 500 steps, rel < 1e-3 torus / 1e-2 wall) | `bench_step` Section 4 — see [BENCH.md](BENCH.md) |
+| 4 modes (`paper_strict × border`) tested | `m1_regression_gpu::gpu_pipeline_mass_conservation_100_steps` — 8 cases pass |
+| Regression fixture committed | `tests/regression_fixtures/m1_baseline/` (8 cases, M1.15 generator) |
+| Real-time animation in native window | `native_gpu` at 55+ FPS on 64×64 / C=3 (M2.10) |
 
 ## JAX fixture re-generation (optional, M1.6 L2)
 
