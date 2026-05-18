@@ -8,12 +8,23 @@
 
 use std::future::Future;
 
+pub mod activation_buffer;
+pub mod config_border;
+pub mod globals;
 pub mod kernel_buffers;
+pub mod passes;
 pub mod readback;
 
+pub use activation_buffer::{
+    flatten_activation_channel_major, readback_activation, unflatten_activation_channel_major,
+    upload_activation,
+};
+pub use config_border::BorderCode;
+pub use globals::GpuGlobals;
 pub use kernel_buffers::{
     readback_kernels, readback_meta, upload_kernels, GpuKernelBuffers, GpuKernelMeta,
 };
+pub use passes::ConvolvePass;
 pub use readback::readback_buffer;
 
 /// Owns the four core `wgpu` handles the rest of the crate (and the

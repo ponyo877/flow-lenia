@@ -195,12 +195,20 @@ pub fn upload_kernels(ctx: &GpuContext, params: &KernelParams) -> GpuKernelBuffe
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC,
         });
+    // Note (M2.3): `STORAGE` is OR'd in alongside `UNIFORM` so the
+    // WGSL convolve shader can bind this as `var<storage, read>
+    // array<Meta>` (runtime-sized array). A buffer with both flags
+    // can be bound either way; the runtime-array form is required
+    // because `K` (= `cfg.num_kernels`) varies without pipeline
+    // rebuild, and WGSL `var<uniform>` arrays must have a
+    // compile-time fixed size.
     let meta = ctx
         .device
         .create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("flow-lenia kernel meta"),
             contents: bytemuck::cast_slice(&meta_vec),
             usage: wgpu::BufferUsages::UNIFORM
+                | wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC,
         });
