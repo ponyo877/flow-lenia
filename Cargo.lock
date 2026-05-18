@@ -484,6 +484,7 @@ dependencies = [
  "flow-lenia-ui",
  "log",
  "pollster",
+ "wgpu",
  "winit",
 ]
 

@@ -26,6 +26,7 @@ path = "src/bin/generate_m1_fixtures.rs"
 flow-lenia-core.workspace = true
 flow-lenia-gpu.workspace = true
 flow-lenia-ui.workspace = true
+wgpu.workspace = true
 winit.workspace = true
 pollster.workspace = true
 env_logger.workspace = true
