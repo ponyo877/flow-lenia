@@ -22,3 +22,6 @@ pollster.workspace = true
 [dev-dependencies]
 rand.workspace = true
 rand_chacha.workspace = true
+# Pinned to 0.24.x so we stay compatible with rust-toolchain.toml's
+# 1.87.0; image 0.25 requires 1.88+.
+image = { version = "0.24", default-features = false, features = ["png"] }

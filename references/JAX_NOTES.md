@@ -491,3 +491,40 @@ WGSL コメントからの引用フォーマット例:
 - **simutils.py / examples 未読**: 初期パターンの設定方法 (`patch_size`, `creatures_per_grid`)、`vizutils.py` のカラーマッピングなど、UI 仕様の参考になる箇所
 - **clone した repo の commit hash を固定** (`git rev-parse HEAD` の結果を本書に追記)
 - **論文 Figure 4 のパラメータ**: examples ディレクトリにあるか確認 → 回帰 fixture の元ネタにする
+
+---
+
+## 14. Empirical Lyapunov exponents (M2.8 verify)
+
+Measured during the M2.8 verification of CPU-vs-GPU divergence
+behaviour. Setup: 32×32 torus grid, `seed = 42`, `num_kernels = 10`,
+default kernel-param sampling (`sample_random`). Two trajectories
+diverged by an `ε = 1e-6` uniform perturbation of the initial
+activation; tracked `max_abs` over 100 CPU-only steps.
+
+| `C` | Empirical λ (per step) | Regime              |
+|-----|------------------------|---------------------|
+|  1  | **≈ 0.03**             | weakly chaotic      |
+|  3  | **≈ 0.17**             | strongly chaotic    |
+
+Test that produced these numbers:
+`crates/flow-lenia-gpu/tests/diagnose_divergence.rs ::
+estimate_lyapunov_exponent_c1_vs_c3` (run with
+`cargo test --release ... -- --ignored --nocapture`).
+
+Practical consequences for the project:
+- **Field-comparison testing across implementations** (CPU↔GPU, JAX↔Rust,
+  Rust↔Rust under different toolchains) is **only meaningful** for
+  step counts much less than `1 / λ ≈ 6` steps at `C = 3`, or roughly
+  30 steps at `C = 1`. Anything past that and the trajectories will
+  *correctly* sit on different points of the same dynamics.
+- **Mass conservation** is the right invariant for long-trajectory
+  testing — it's a physical quantity, not a trajectory property, and
+  stays at the f32 accumulation floor (`~5e-6` after 100 steps).
+- **M5 evolutionary search horizon** should be on the order of
+  `2/λ ≈ 12` steps for `C = 3` and `60` steps for `C = 1` — long enough
+  for a creature's behaviour to differentiate, short enough that
+  the f32 noise floor is still well below the dynamical-feature scale.
+- **Lenia paper** (Chan 2019, 2020) and **Flow-Lenia paper** (Plantec
+  2025) do not quote these numbers directly; this is repository-local
+  measurement.

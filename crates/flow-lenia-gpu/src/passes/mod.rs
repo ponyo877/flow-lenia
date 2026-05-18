@@ -12,6 +12,7 @@ pub mod convolve;
 pub mod flow;
 pub mod gradient;
 pub mod reintegrate;
+pub mod visualize;
 
 pub use affinity_growth::{
     upload_constant_weights, upload_localized_weights, AffinityGrowthPass, GpuConstantWeights,
@@ -21,3 +22,4 @@ pub use convolve::ConvolvePass;
 pub use flow::FlowPass;
 pub use gradient::GradientPass;
 pub use reintegrate::ReintegratePass;
+pub use visualize::{VisualizeGlobals, VisualizePass};

@@ -15,6 +15,7 @@ pub mod kernel_buffers;
 pub mod passes;
 pub mod pipeline;
 pub mod readback;
+pub mod texture_readback;
 
 pub use activation_buffer::{
     flatten_activation_channel_major, readback_activation, unflatten_activation_channel_major,
@@ -27,10 +28,12 @@ pub use kernel_buffers::{
 };
 pub use passes::{
     upload_constant_weights, upload_localized_weights, AffinityGrowthPass, ConvolvePass, FlowPass,
-    GpuConstantWeights, GradientPass, ReintegratePass, MAX_KERNELS,
+    GpuConstantWeights, GradientPass, ReintegratePass, VisualizeGlobals, VisualizePass,
+    MAX_KERNELS,
 };
 pub use pipeline::GpuStepPipeline;
 pub use readback::readback_buffer;
+pub use texture_readback::readback_rgba8_texture;
 
 /// Owns the four core `wgpu` handles the rest of the crate (and the
 /// downstream binary) needs.
