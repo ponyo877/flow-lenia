@@ -9,9 +9,11 @@
 
 pub mod affinity_growth;
 pub mod convolve;
+pub mod gradient;
 
 pub use affinity_growth::{
     upload_constant_weights, upload_localized_weights, AffinityGrowthPass, GpuConstantWeights,
     MAX_KERNELS,
 };
 pub use convolve::ConvolvePass;
+pub use gradient::GradientPass;

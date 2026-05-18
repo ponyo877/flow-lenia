@@ -43,3 +43,48 @@ fn growth_fn(x: f32, mu: f32, sigma: f32) -> f32 {
     let z = (x - mu) / sigma;
     return 2.0 * exp(-z * z * 0.5) - 1.0;
 }
+
+// Border-resolved sample location.
+//
+// `x` and `y` are the in-bounds source coordinates the caller should
+// read from; `valid` is 1 when the input was inside the grid (or
+// wrapped onto it under `BORDER_TORUS`), and 0 when the input was
+// outside the grid under `BORDER_WALL`. Callers should branch on
+// `valid` before consuming `(x, y)`.
+//
+// WGSL `bool` cannot live in storage/uniform structs portably, so
+// `valid` is encoded as `u32` (`0 | 1`).
+struct BorderSample {
+    x: u32,
+    y: u32,
+    valid: u32,
+};
+
+// Resolve `(x, y)` against the grid `(w, h)` per `border`:
+//   - `BORDER_TORUS`: wrap modulo into `[0, w) × [0, h)`, `valid = 1`.
+//   - `BORDER_WALL`: pass through if in-bounds (`valid = 1`); zero +
+//     `valid = 0` otherwise — callers should treat the sample as 0.
+//
+// Inputs are signed so caller arithmetic on offsets (e.g.
+// `centre_y + dy`) can take negative values without an explicit cast.
+fn border_resolve(x: i32, y: i32, w: i32, h: i32, border: u32) -> BorderSample {
+    var out: BorderSample;
+    if (border == BORDER_TORUS) {
+        let sx = ((x % w) + w) % w;
+        let sy = ((y % h) + h) % h;
+        out.x = u32(sx);
+        out.y = u32(sy);
+        out.valid = 1u;
+    } else {
+        if (x < 0 || x >= w || y < 0 || y >= h) {
+            out.x = 0u;
+            out.y = 0u;
+            out.valid = 0u;
+        } else {
+            out.x = u32(x);
+            out.y = u32(y);
+            out.valid = 1u;
+        }
+    }
+    return out;
+}
