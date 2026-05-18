@@ -18,6 +18,10 @@ path = "src/bin/native_cpu.rs"
 name = "native_gpu"
 path = "src/bin/native_gpu.rs"
 
+[[bin]]
+name = "generate_m1_fixtures"
+path = "src/bin/generate_m1_fixtures.rs"
+
 [dependencies]
 flow-lenia-core.workspace = true
 flow-lenia-gpu.workspace = true

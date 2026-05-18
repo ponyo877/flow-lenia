@@ -30,10 +30,10 @@ mutation beams are supported in later milestones.
 
 | Crate | Purpose | Status |
 |---|---|---|
-| `crates/flow-lenia-core/` | Platform-independent CA logic and CPU reference | M1.1 skeleton |
+| `crates/flow-lenia-core/` | Platform-independent CA logic and CPU reference | M1 complete |
 | `crates/flow-lenia-gpu/` | wgpu compute pipeline | M1.1 skeleton |
 | `crates/flow-lenia-ui/` | egui controls / statistics panels | M1.1 skeleton |
-| `crates/flow-lenia-app/` | Native binaries (`native_cpu`, `native_gpu`) | M1.1 skeleton |
+| `crates/flow-lenia-app/` | Native binaries (`native_cpu`, `native_gpu`, `generate_m1_fixtures`) | M1.14 native_cpu live |
 
 ## Build / Run
 
@@ -48,25 +48,25 @@ cargo run -p flow-lenia-app --bin native_cpu
 cargo run -p flow-lenia-app --bin native_gpu
 ```
 
-Toolchain: Rust **1.76.0** stable (pinned via `rust-toolchain.toml`).
+Toolchain: Rust **1.87.0** stable (pinned via `rust-toolchain.toml`).
 
 ## Milestone status
 
 - [x] **M1.1** — Project skeleton
-- [ ] **M1.2** — Common type definitions (`FlowLeniaConfig`, mode enums, `KernelParams`)
-- [ ] **M1.3** — Parameter sampling (JAX `flowlenia.py:55-64` ranges)
-- [ ] **M1.4** — Kernel generation (JAX form, paper Eq. 1 mapped)
-- [ ] **M1.5** — Growth function `G_i` (paper Eq. 2)
-- [ ] **M1.6** — Direct convolution (CPU, torus/wall, per-kernel radius)
-- [ ] **M1.7** — Sobel filter (no normalization, JAX `utils.py:16-37`)
-- [ ] **M1.8** — α computation (both modes per `DESIGN.md` §4.1.5)
-- [ ] **M1.9** — Flow `F` (paper Eq. 5)
-- [ ] **M1.10** — Overlap area (with `min(1, 2σ)` clip per JAX `utils.py:57-58`)
-- [ ] **M1.11** — Reintegration tracking (paper Eq. 6, 11×11 neighborhood)
-- [ ] **M1.12** — Affinity `U` with parameter embedding (paper Eq. 7)
-- [ ] **M1.13** — One-step integration
-- [ ] **M1.14** — Terminal visualization
-- [ ] **M1.15** — Mass conservation across all mode combinations
+- [x] **M1.2** — Common type definitions (`FlowLeniaConfig`, mode enums, `KernelParams`)
+- [x] **M1.3** — Parameter sampling (JAX `flowlenia.py:55-64` ranges)
+- [x] **M1.4** — Kernel generation (JAX form, paper Eq. 1 mapped)
+- [x] **M1.5** — Growth function `G_i` (paper Eq. 2)
+- [x] **M1.6** — Direct convolution (CPU, torus/wall, per-kernel radius)
+- [x] **M1.7** — Sobel filter (no normalization, JAX `utils.py:16-37`)
+- [x] **M1.8** — α computation (both modes per `DESIGN.md` §4.1.5)
+- [x] **M1.9** — Flow `F` (paper Eq. 5)
+- [x] **M1.10** — Overlap area (with `min(1, 2σ)` clip per JAX `utils.py:57-58`)
+- [x] **M1.11** — Reintegration tracking (paper Eq. 6, 11×11 neighborhood)
+- [x] **M1.12** — Affinity `U` with parameter embedding (paper Eq. 7)
+- [x] **M1.13** — One-step integration
+- [x] **M1.14** — Terminal visualization
+- [x] **M1.15** — Mass conservation across all mode combinations
 - [ ] **M2.1–M2.11** — GPU pipeline
 
 See `DESIGN.md` §8 for milestone definitions and completion criteria.
@@ -85,6 +85,25 @@ python3 -m venv .venv-fixtures
 ```
 
 `.venv-fixtures/` is gitignored. CI does not need a JAX environment.
+
+## M1 regression fixtures
+
+`crates/flow-lenia-core/tests/m1_regression.rs` asserts bit-equality
+between the simulator output and the 8 baseline fixtures committed under
+`tests/regression_fixtures/m1_baseline/` (one per `paper_strict × border × C`
+combination, 100 steps from `seed=42`). Re-generate only when the dynamics
+or supporting infra intentionally changes:
+
+```sh
+cargo run --release --bin generate_m1_fixtures
+```
+
+Bit-equality requires the **same Rust toolchain (1.87.0, pinned via
+`rust-toolchain.toml`)** and the **same resolved `ndarray` version**
+(see `manifest.json`); regenerate after either upgrade. The 1000-step
+mass-conservation matrix lives in `tests/mass_conservation_1k.rs` and
+runs under `cargo test --release -p flow-lenia-core --test
+mass_conservation_1k -- --ignored`.
 
 ## License
 
