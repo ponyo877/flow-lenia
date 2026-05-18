@@ -29,6 +29,15 @@ flow-lenia-gpu.workspace = true
 # overriding default-features through `workspace = true` (see warning
 # in wgpu 29 toolchain), so this crate pins its own wgpu line.
 wgpu = { version = "29", default-features = false, features = ["webgpu", "wgsl"] }
+# M4.1: egui directly (no eframe wrapper). 0.34 ships with wgpu 29
+# support (`egui-wgpu`) and a winit-0.30 `ApplicationHandler` shim
+# (`egui-winit`). The native binary stays egui-free in M4.
+egui = "0.34"
+egui-wgpu = "0.34"
+# egui-winit's defaults pull in arboard / smithay-clipboard / x11 /
+# wayland (clipboard + Linux backends), none of which compile for
+# wasm32. Keep them off, opt back into the wasm-safe subset.
+egui-winit = { version = "0.34", default-features = false, features = ["links", "webbrowser", "bytemuck"] }
 winit.workspace = true
 wasm-bindgen = "0.2.120"
 wasm-bindgen-futures = "0.4"

@@ -295,7 +295,7 @@ fn section_per_pass(ctx: &GpuContext) {
         reintegrate_pass.record(enc, &reintegrate_bg, grid, grid);
     });
     let visualize_us = measure_pass(ctx, "visualize", iters, |enc| {
-        visualize_pass.record(enc, &viz_bg, &viz_view);
+        visualize_pass.record(enc, &viz_bg, &viz_view, None);
     });
     let pass_sum = convolve_us + affinity_us + grad_u_us + grad_as_us + flow_us + reintegrate_us;
 

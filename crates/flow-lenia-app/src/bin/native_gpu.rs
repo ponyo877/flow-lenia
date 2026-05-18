@@ -320,7 +320,9 @@ fn render_frame(state: &mut AppState) {
         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("M2.10 frame encoder"),
         });
-    state.visualize.record(&mut encoder, &bind_group, &view);
+    // None: draw across the whole window — native_gpu has no UI panel
+    // overlay (egui is web-only in M4).
+    state.visualize.record(&mut encoder, &bind_group, &view, None);
     state.gpu.queue.submit([encoder.finish()]);
     frame.present();
 }

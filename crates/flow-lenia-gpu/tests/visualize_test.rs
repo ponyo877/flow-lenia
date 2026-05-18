@@ -70,7 +70,7 @@ fn render_to_rgba(
         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("visualize test encoder"),
         });
-    pass.record(&mut enc, &bg, &view);
+    pass.record(&mut enc, &bg, &view, None);
     ctx.queue.submit([enc.finish()]);
     ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
 

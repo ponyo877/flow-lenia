@@ -4,39 +4,36 @@
 // root keeps `cargo clippy --workspace --all-targets` (native) green
 // — when compiled for the host the crate is an empty rlib.
 #![cfg(target_arch = "wasm32")]
-//! Flow-Lenia browser entry point (M3.4 — full pipeline in Chrome).
+//! Flow-Lenia browser entry point (M4.1 — egui side panel over wgpu).
 //!
-//! Boot path:
+//! Layout (logical pixels): the canvas is `CANVAS_W` × `CANVAS_H`. egui
+//! claims a fixed `SIDE_PANEL_W`-wide column on the right via
+//! `egui::SidePanel::right`, leaving the Flow-Lenia visualisation in
+//! the remaining `CentralPanel` rect on the left.
 //!
-//! 1. `wasm_bindgen(start)` → `run()`
-//!    - install panic hook + console logger
-//!    - build `EventLoop<AppEvent>` with a user-event channel
-//!    - `event_loop.run_app(&mut App { state: None, ... })`
-//! 2. `ApplicationHandler::resumed`
-//!    - look up `<canvas id="flow-lenia-canvas">`, build a winit
-//!      `Window` with `.with_canvas(canvas)` + the explicit
-//!      `with_inner_size(512, 512)` workaround for the 2^25 trap
-//!    - `spawn_local`s an async task that builds a wgpu instance +
-//!      window-bound surface, requests an adapter compatible with
-//!      the surface, constructs [`flow_lenia_gpu::GpuStepPipeline`]
-//!      from the same `(cfg, seed)` the M2.10 native binary uses,
-//!      constructs [`flow_lenia_gpu::VisualizePass`] + two pre-built
-//!      bind groups (ping/pong over the pipeline's A buffers), and
-//!      proxies `AppEvent::GpuReady(AppState)` back
-//! 3. `ApplicationHandler::user_event(GpuReady)`
-//!    - install `AppState`, request first redraw
-//! 4. `WindowEvent::RedrawRequested`
-//!    - if `running`, advance the pipeline by `steps_per_frame`
-//!    - `visualize_pass.record(...)` reads
-//!      `pipeline.a_buffer(pipeline.ping_index())` via the
-//!      pre-built `visualize_bind_groups[ping]` — no per-frame
-//!      bind-group rebuild
-//!    - submit + present, FPS tick, request next redraw
-//! 5. `WindowEvent::KeyboardInput`
-//!    - Space toggles `running`
-//!    - r/R rebuilds the pipeline from a fresh `FlowLeniaSimulator`
-//!    - q/Q calls `event_loop.exit()` (may be ignored by the browser
-//!      tab; that's expected — see DESIGN.md M3.4 notes)
+//! Render pipeline (per frame):
+//!
+//! 1. step the GPU pipeline `steps_per_frame` times (M3.4 logic).
+//! 2. begin one wgpu encoder.
+//! 3. `VisualizePass::record(..., Some((x, y, w, h)))` — Flow-Lenia
+//!    draws into the CentralPanel sub-rect of the surface; the
+//!    `LoadOp::Clear` inside `record` clears the full attachment first
+//!    so the SidePanel side stays black until egui paints over it.
+//! 4. egui-wgpu `Renderer::update_buffers` populates per-frame
+//!    vertex / uniform buffers.
+//! 5. a second render pass with `LoadOp::Load` runs egui's draw
+//!    commands over the same surface texture (panel background +
+//!    text + future controls).
+//! 6. submit, present, request the next redraw.
+//!
+//! Event routing:
+//!
+//! - `egui_winit::State::on_window_event` is called first; if it
+//!   reports `consumed`, the app's keyboard branch is skipped. This
+//!   lets future text inputs / sliders absorb their key strokes
+//!   without firing the Space/r/q shortcuts.
+//! - `EventResponse::repaint` requests an extra redraw (egui needs
+//!   one even when the simulation is paused).
 //!
 //! No per-step CPU readback. `device.poll(Wait)` is **never** invoked
 //! on the web — the surface's `present()` and the browser's redraw
@@ -60,14 +57,25 @@ use winit::platform::web::WindowAttributesExtWebSys;
 use winit::window::{Window, WindowId};
 
 const CANVAS_ID: &str = "flow-lenia-canvas";
-// Canvas CSS size in logical pixels. Hard-coded for M3 — M4 UI work
-// will turn these into a resizable / grid-size-tunable value, at
-// which point the `<= 1` fallback heuristic in
-// `resolve_physical_canvas_size` also needs revisiting (it currently
-// assumes "tiny reading = winit init race", which only holds while
-// the displayed canvas is locked to these constants).
-const CANVAS_W: u32 = 512;
+// Canvas CSS size in logical pixels. M4.1 widened to 768×512 so the
+// 250-px SidePanel fits next to a 512×512 Flow-Lenia square. Both
+// dimensions are still compile-time constants — the `<= 1` fallback
+// heuristic in `resolve_physical_canvas_size` assumes they don't
+// change at runtime (TODO(M4): revisit if/when UI adds a resize handle
+// or a grid-size dropdown).
+// Canvas CSS size in logical pixels. M4.1 widened to 768×512 so the
+// 250-px SidePanel fits next to a 512×512 Flow-Lenia square. Both
+// dimensions are still compile-time constants — the `<= 1` fallback
+// heuristic in `resolve_physical_canvas_size` assumes they don't
+// change at runtime (TODO(M4): revisit if/when UI adds a resize handle
+// or a grid-size dropdown).
+const CANVAS_W: u32 = 768;
 const CANVAS_H: u32 = 512;
+/// Width of the egui SidePanel on the right edge, in logical pixels.
+/// The Flow-Lenia visualisation gets `CANVAS_W - SIDE_PANEL_W` logical
+/// pixels of horizontal room (matches the `egui::SidePanel::right`
+/// call below; keep them in sync).
+const SIDE_PANEL_W: u32 = 250;
 const GRID_W: u32 = 64;
 const GRID_H: u32 = 64;
 const SEED: u64 = 1729;
@@ -89,7 +97,7 @@ fn demo_cfg() -> FlowLeniaConfig {
     }
 }
 
-/// One full Flow-Lenia run state — everything `RedrawRequested` and
+/// One full Flow-Lenia run state — everything the render loop and
 /// keyboard handlers need.
 struct AppState {
     window: Arc<Window>,
@@ -102,9 +110,17 @@ struct AppState {
     /// Pre-built bind groups for the two ping-pong A buffers.
     /// Indexed by `pipeline.ping_index()` each frame.
     visualize_bind_groups: [wgpu::BindGroup; 2],
+    /// Physical-pixel viewport allocated to the Flow-Lenia render.
+    /// `(CANVAS_W - SIDE_PANEL_W) × dpr`; visualize draws into this
+    /// sub-rect and egui paints the complement.
+    flow_lenia_viewport: (f32, f32, f32, f32),
     running: bool,
     fps: FpsCounter,
     steps_per_frame: u32,
+    // ─── egui ──────────────────────────────────────────────────────
+    egui_ctx: egui::Context,
+    egui_winit_state: egui_winit::State,
+    egui_renderer: egui_wgpu::Renderer,
 }
 
 struct FpsCounter {
@@ -158,6 +174,25 @@ impl App {
 }
 
 impl ApplicationHandler<AppEvent> for App {
+    /// `winit 0.30.13` (web) + `wgpu 29` regressed the `request_redraw
+    /// → WindowEvent::RedrawRequested` dispatch path: the event never
+    /// arrives at `window_event`, so the M3.5-style "advance simulation
+    /// inside the RedrawRequested arm" loop never fires. EventLoop
+    /// itself is healthy (this method runs ~1000×/sec with
+    /// `ControlFlow::Poll`), so we drive rendering from here instead.
+    /// See `docs/known-issues.md` for the full diagnostic trail.
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(state) = self.state.as_mut() {
+            if state.running {
+                for _ in 0..state.steps_per_frame {
+                    state.pipeline.step(&state.gpu);
+                }
+            }
+            render_frame(state);
+            state.fps.tick(state.pipeline.step_count(), state.running);
+        }
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.init_started {
             return;
@@ -174,7 +209,7 @@ impl ApplicationHandler<AppEvent> for App {
         // `with_inner_size` or the DOM `width`/`height` get reset to
         // 2^25 (M3.2 pitfall — kept for posterity here too).
         let attrs = Window::default_attributes()
-            .with_title("Flow-Lenia (M3.4)")
+            .with_title("Flow-Lenia (M4.1)")
             .with_inner_size(LogicalSize::new(CANVAS_W, CANVAS_H))
             .with_canvas(Some(canvas));
         let window = Arc::new(
@@ -203,8 +238,11 @@ impl ApplicationHandler<AppEvent> for App {
                     state.gpu.adapter.get_info().name,
                     state.surface_config.format
                 );
-                state.window.request_redraw();
                 self.state = Some(*state);
+                // `about_to_wait` will start driving render_frame from
+                // the next poll; no explicit request_redraw needed
+                // (and request_redraw is currently a no-op anyway —
+                // see the workaround note on `about_to_wait`).
             }
         }
     }
@@ -218,6 +256,18 @@ impl ApplicationHandler<AppEvent> for App {
         let Some(state) = self.state.as_mut() else {
             return;
         };
+
+        // Hand every WindowEvent to egui first so future text inputs
+        // / sliders absorb their key strokes before our Space/r/q
+        // shortcuts fire. `EventResponse::consumed` says "this event
+        // was for me, don't double-handle it". We deliberately do
+        // **not** honour `EventResponse::repaint` here — rendering is
+        // driven by `about_to_wait` as a workaround for the broken
+        // RedrawRequested dispatch (see that method's note).
+        let egui_response = state
+            .egui_winit_state
+            .on_window_event(&state.window, &event);
+
         match event {
             WindowEvent::CloseRequested => {
                 log::info!("close requested at step={}", state.pipeline.step_count());
@@ -232,7 +282,7 @@ impl ApplicationHandler<AppEvent> for App {
                         ..
                     },
                 ..
-            } => match logical_key.as_ref() {
+            } if !egui_response.consumed => match logical_key.as_ref() {
                 Key::Named(NamedKey::Space) => {
                     state.running = !state.running;
                     log::info!(
@@ -254,16 +304,10 @@ impl ApplicationHandler<AppEvent> for App {
                 }
                 _ => {}
             },
-            WindowEvent::RedrawRequested => {
-                if state.running {
-                    for _ in 0..state.steps_per_frame {
-                        state.pipeline.step(&state.gpu);
-                    }
-                }
-                render_frame(state);
-                state.fps.tick(state.pipeline.step_count(), state.running);
-                state.window.request_redraw();
-            }
+            // Kept for forward-compatibility: when upstream restores
+            // RedrawRequested delivery, simply route the render call
+            // here and remove the `about_to_wait`-based pump.
+            WindowEvent::RedrawRequested => {}
             _ => {}
         }
     }
@@ -360,14 +404,24 @@ async fn build_app_state(window: Arc<Window>) -> AppState {
     let pipeline = GpuStepPipeline::new(&gpu, &cfg, &kernel_params, &initial_a);
 
     // ─── Visualize pass ────────────────────────────────────────────
-    // `upscale` is the surface-pixel-to-grid ratio. We derive it from
-    // the same `resolve_physical_canvas_size` helper as the surface
-    // itself, so the two are guaranteed to agree even when the helper
-    // takes the dpr-based fallback path (a `surface_config.width / 64`
-    // computation would otherwise round to 0 during the 1×1 init race
-    // and panic in `VisualizePass::new`'s `assert!(upscale > 0)`).
-    let upscale = (physical_w / GRID_W).max(1);
-    log::info!("visualize upscale = {upscale} (physical canvas = {physical_w}x{physical_h})");
+    // M4.1: Flow-Lenia no longer owns the full surface — egui's
+    // SidePanel takes `SIDE_PANEL_W` logical pixels on the right.
+    // Derive the *available* width and use it (rather than the full
+    // canvas width) to pick the integer `upscale` factor; this keeps
+    // the rendered creature square and fitting cleanly inside the
+    // CentralPanel rect.
+    let dpr = web_sys::window()
+        .map(|w| w.device_pixel_ratio())
+        .unwrap_or(1.0);
+    let central_logical_w = CANVAS_W - SIDE_PANEL_W;
+    let central_physical_w = ((f64::from(central_logical_w) * dpr).round() as u32).max(GRID_W);
+    let central_physical_h = ((f64::from(CANVAS_H) * dpr).round() as u32).max(GRID_H);
+    let upscale = (central_physical_w.min(central_physical_h) / GRID_W).max(1);
+    let viewport_side = upscale * GRID_W;
+    let flow_lenia_viewport = (0.0, 0.0, viewport_side as f32, viewport_side as f32);
+    log::info!(
+        "visualize upscale = {upscale} (central panel = {central_physical_w}x{central_physical_h}, viewport side = {viewport_side})"
+    );
     let visualize = VisualizePass::new(&gpu, format, upscale);
     let visualize_globals_buf = visualize.upload_globals(&gpu, GRID_H, GRID_W, cfg.channels);
     // Pre-build a bind group for each of the two ping-pong A buffers.
@@ -375,6 +429,23 @@ async fn build_app_state(window: Arc<Window>) -> AppState {
         visualize.make_bind_group(&gpu, pipeline.a_buffer(0), &visualize_globals_buf),
         visualize.make_bind_group(&gpu, pipeline.a_buffer(1), &visualize_globals_buf),
     ];
+
+    // ─── egui ──────────────────────────────────────────────────────
+    // `Context` is cheap to clone (Arc inside) — egui-winit needs its
+    // own handle. The renderer lives on the wgpu side and shares the
+    // surface format so its draws blend correctly with the visualize
+    // output already on the surface texture.
+    let egui_ctx = egui::Context::default();
+    let egui_winit_state = egui_winit::State::new(
+        egui_ctx.clone(),
+        egui::ViewportId::ROOT,
+        &*window,
+        Some(dpr as f32),
+        None,
+        Some(8192),
+    );
+    let egui_renderer =
+        egui_wgpu::Renderer::new(&gpu.device, format, egui_wgpu::RendererOptions::default());
 
     AppState {
         window,
@@ -385,9 +456,13 @@ async fn build_app_state(window: Arc<Window>) -> AppState {
         visualize,
         visualize_globals_buf,
         visualize_bind_groups,
+        flow_lenia_viewport,
         running: true,
         fps: FpsCounter::new(),
         steps_per_frame: 1,
+        egui_ctx,
+        egui_winit_state,
+        egui_renderer,
     }
 }
 
@@ -442,15 +517,99 @@ fn render_frame(state: &mut AppState) {
         .texture
         .create_view(&wgpu::TextureViewDescriptor::default());
 
+    // ─── 1. egui pass: build UI shapes from this frame's input ─────
+    let raw_input = state.egui_winit_state.take_egui_input(&state.window);
+    // egui 0.34 deprecated `SidePanel::show(&Context, ...)` in favour
+    // of a Ui-centric API (PR #5659 unifies SidePanel / TopBottomPanel
+    // under a single `Panel` and pushes everyone toward
+    // `show_inside(&mut Ui, ...)`). The Context-based call still works
+    // at runtime — slated for a follow-up clean-up sub-step inside M4.
+    #[allow(deprecated)]
+    let full_output = state.egui_ctx.run(raw_input, |ctx| {
+        // Only the SidePanel is shown — egui then leaves the
+        // CentralPanel region untouched, so the visualize pass's
+        // pixels remain visible underneath. (Adding a CentralPanel
+        // here, even with `Frame::NONE`, paints over the creature
+        // because egui still emits a fullscreen background quad.)
+        egui::SidePanel::right("controls")
+            .resizable(false)
+            .exact_width(SIDE_PANEL_W as f32)
+            .show(ctx, |ui| {
+                ui.heading("Flow-Lenia");
+                ui.separator();
+                ui.label("M4.1: Hello egui");
+                ui.add_space(8.0);
+                ui.label("(M4.2 で controls 追加予定)");
+            });
+    });
+    state
+        .egui_winit_state
+        .handle_platform_output(&state.window, full_output.platform_output);
+    let paint_jobs = state
+        .egui_ctx
+        .tessellate(full_output.shapes, full_output.pixels_per_point);
+    let screen_descriptor = egui_wgpu::ScreenDescriptor {
+        size_in_pixels: [state.surface_config.width, state.surface_config.height],
+        pixels_per_point: full_output.pixels_per_point,
+    };
+
+    // ─── 2. wgpu encoder: visualize → egui → present ───────────────
     let bg = &state.visualize_bind_groups[state.pipeline.ping_index()];
     let mut encoder = state
         .gpu
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("M3.4 frame encoder"),
+            label: Some("M4.1 frame encoder"),
         });
-    state.visualize.record(&mut encoder, bg, &view);
-    state.gpu.queue.submit([encoder.finish()]);
+
+    for (id, image_delta) in &full_output.textures_delta.set {
+        state
+            .egui_renderer
+            .update_texture(&state.gpu.device, &state.gpu.queue, *id, image_delta);
+    }
+    let egui_pre_cmds = state.egui_renderer.update_buffers(
+        &state.gpu.device,
+        &state.gpu.queue,
+        &mut encoder,
+        &paint_jobs,
+        &screen_descriptor,
+    );
+
+    state
+        .visualize
+        .record(&mut encoder, bg, &view, Some(state.flow_lenia_viewport));
+
+    {
+        let egui_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("egui render pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        state.egui_renderer.render(
+            &mut egui_pass.forget_lifetime(),
+            &paint_jobs,
+            &screen_descriptor,
+        );
+    }
+
+    for id in &full_output.textures_delta.free {
+        state.egui_renderer.free_texture(id);
+    }
+
+    let mut to_submit = egui_pre_cmds;
+    to_submit.push(encoder.finish());
+    state.gpu.queue.submit(to_submit);
     frame.present();
 }
 

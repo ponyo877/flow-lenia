@@ -192,11 +192,18 @@ impl VisualizePass {
     /// Record a single draw of the fullscreen triangle into `encoder`,
     /// targeting `target_view`. The caller controls clear / load
     /// behaviour and submission timing.
+    ///
+    /// `viewport`, when `Some((x, y, w, h))` (physical pixels), confines
+    /// the draw to a sub-rect of `target_view` — added in M4.1 so the
+    /// egui side panel can claim part of the canvas without the
+    /// Flow-Lenia render covering it. `None` falls back to the previous
+    /// behaviour of drawing across the entire attachment.
     pub fn record(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         bind_group: &wgpu::BindGroup,
         target_view: &wgpu::TextureView,
+        viewport: Option<(f32, f32, f32, f32)>,
     ) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("visualize render pass"),
@@ -220,6 +227,14 @@ impl VisualizePass {
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, bind_group, &[]);
+        if let Some((x, y, w, h)) = viewport {
+            // Oversize triangle covers normalised device space [-1, 1].
+            // Restricting the viewport scissors the rasteriser to the
+            // sub-rect; the clear (LoadOp::Clear above) still applies
+            // to the full attachment, so unused canvas area stays
+            // black even when egui has not drawn over it yet.
+            pass.set_viewport(x, y, w, h, 0.0, 1.0);
+        }
         // 3 vertices, 1 instance — oversize triangle.
         pass.draw(0..3, 0..1);
     }
