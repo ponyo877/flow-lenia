@@ -111,8 +111,9 @@ Toolchain: Rust **1.87.0** stable (pinned via `rust-toolchain.toml`).
 - [x] **M3.2** — Hello WebGPU in Chrome (blue-screen baseline)
 - [x] **M3.3** — Convolve pass through `wgpu` on the browser
 - [x] **M3.4** — Full pipeline animation in the canvas
-- [x] **M3.5** — Chrome stability + keyboard verify
-  ([BROWSER_COMPAT.md](BROWSER_COMPAT.md)); Safari / Firefox pending M5 deploy
+- [x] **M3.5** — Chrome stability + keyboard verify; Safari 26.3.1 and
+  Firefox 150.0.3 basic-functionality verified
+  ([BROWSER_COMPAT.md](BROWSER_COMPAT.md))
 
 See `DESIGN.md` §8 for milestone definitions and completion criteria.
 

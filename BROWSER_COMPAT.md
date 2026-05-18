@@ -49,21 +49,23 @@ handles `devicePixelRatio` on HiDPI canvases.
   trajectory was previously verified to `rel < 1e-3` (torus) in
   BENCH.md §4.
 
-## Other browsers (not yet verified on real hardware)
+## Other browsers
 
-| Browser           | Expected status    | Notes                                            |
-| ----------------- | ------------------ | ------------------------------------------------ |
-| Safari 26+        | Should work        | WebGPU enabled by default in Safari 26 (2025).   |
-| Firefox 147+      | Should work        | WebGPU shipped stable in Firefox 147 (2025).     |
-| Chromium-based\*  | Same as Chrome     | Edge / Brave / Arc all reuse Blink + Tint.       |
+| Browser           | Status                          | Notes                                                  |
+| ----------------- | ------------------------------- | ------------------------------------------------------ |
+| Safari 26.3.1     | Basic functionality verified    | Manually exercised on `localhost:8080` (M3.5).         |
+| Firefox 150.0.3   | Basic functionality verified    | Manually exercised on `localhost:8080` (M3.5).         |
+| Chromium-based\*  | Expected same as Chrome         | Edge / Brave / Arc all reuse Blink + Tint.             |
 
 \* Vivaldi and Opera ship Chromium but with their own WebGPU flag
 defaults; treat as "should work" pending real check.
 
-These have not been exercised yet during M3 — the in-IDE browser
-automation harness only attaches to Chrome. Their status will be updated
-during M5 (deploy / GitHub Pages) when the bundle goes live and the
-maintainer can hit each browser directly.
+Safari 26.3.1 and Firefox 150.0.3 were spot-checked manually on the
+M3.5 development host — the canvas renders and the simulation animates.
+The detailed measurements above (steady-state FPS, JS heap, long-run
+stability) have only been taken on Chrome. Per-browser performance and
+shader-compiler quirks (Safari's WebKit/WebGPU layer, Firefox's
+`wgpu-core` host implementation) will be revisited during M5 deploy.
 
 ## Known limitations
 
