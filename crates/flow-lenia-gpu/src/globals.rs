@@ -24,15 +24,22 @@ use flow_lenia_core::config::BorderMode;
 ///  20..24  half_side    : u32   = (max_side - 1) / 2
 ///  24..28  border       : u32   0 = Torus, 1 = Wall  (see BorderCode)
 ///  28..32  paper_strict : u32   0 = JAX compat, 1 = paper Eq. 5
-///  32..36  beta_a       : f32   critical mass β_A (M2.6 flow pass)
+///  32..36  beta_a       : f32   critical mass β_A (paper Eq. 5; M2.6)
 ///  36..40  n            : f32   α exponent (paper Eq. 5; M2.6)
-///  40..64  _pad[6]      : u32[] alignment padding (24 bytes)
+///  40..44  dd           : u32   Chebyshev neighbourhood radius (M2.7)
+///  44..48  sigma        : f32   reintegration σ (paper Eq. 6; M2.7)
+///  48..52  dt           : f32   time step (paper Eq. 6; M2.7)
+///  52..64  _pad[3]      : u32[] alignment padding (12 bytes)
 /// ```
 ///
-/// The pre-M2.6 layout was 32 bytes (no `paper_strict / beta_a / n` +
-/// a single `_pad: u32`). M2.6 extends the struct so the M2.4/M2.5
-/// passes that don't read the new fields just leave them at default (0)
-/// — see [`GpuGlobals::new`] + the `with_*` builder methods.
+/// History:
+/// - Pre-M2.6: 32 bytes (no paper_strict / beta_a / n + single `_pad: u32`).
+/// - M2.6: added `paper_strict`, `beta_a`, `n` — 64 bytes.
+/// - M2.7: added `dd`, `sigma`, `dt` — stayed 64 bytes by shrinking
+///   `_pad` from `[u32; 6]` to `[u32; 3]`.
+///
+/// Builder methods (`with_*`) keep callers that don't need the M2.6+
+/// fields at zero diff against the pre-extension API.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, PartialEq, Pod, Zeroable)]
 pub struct GpuGlobals {
@@ -46,7 +53,10 @@ pub struct GpuGlobals {
     pub paper_strict: u32,
     pub beta_a: f32,
     pub n: f32,
-    pub _pad: [u32; 6],
+    pub dd: u32,
+    pub sigma: f32,
+    pub dt: f32,
+    pub _pad: [u32; 3],
 }
 
 const _: () = {
@@ -80,7 +90,10 @@ impl GpuGlobals {
             paper_strict: 0,
             beta_a: 0.0,
             n: 0.0,
-            _pad: [0; 6],
+            dd: 0,
+            sigma: 0.0,
+            dt: 0.0,
+            _pad: [0; 3],
         }
     }
 
@@ -103,6 +116,27 @@ impl GpuGlobals {
     #[must_use]
     pub fn with_n(mut self, n: f32) -> Self {
         self.n = n;
+        self
+    }
+
+    /// Set the Chebyshev neighbourhood radius `dd` (M2.7 reintegrate).
+    #[must_use]
+    pub fn with_dd(mut self, dd: u32) -> Self {
+        self.dd = dd;
+        self
+    }
+
+    /// Set the reintegration distribution width `σ` (paper Eq. 6; M2.7).
+    #[must_use]
+    pub fn with_sigma(mut self, sigma: f32) -> Self {
+        self.sigma = sigma;
+        self
+    }
+
+    /// Set the integration time step `dt` (paper Eq. 6; M2.7).
+    #[must_use]
+    pub fn with_dt(mut self, dt: f32) -> Self {
+        self.dt = dt;
         self
     }
 }

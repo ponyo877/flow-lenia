@@ -24,14 +24,14 @@ struct Globals {
     paper_strict: u32,    // 0 = JAX-compat, 1 = paper Eq. 5 (M2.6)
     beta_a: f32,          // critical mass β_A (paper Eq. 5; M2.6)
     n: f32,               // α exponent (paper Eq. 5; M2.6)
-    // 24 bytes of padding so the struct is 64 bytes total (a
+    dd: u32,              // Chebyshev neighbourhood radius (M2.7)
+    sigma: f32,           // reintegration σ (paper Eq. 6; M2.7)
+    dt: f32,              // integration step (paper Eq. 6; M2.7)
+    // 12 bytes of padding so the struct is 64 bytes total (a
     // 16-byte multiple, as the uniform layout rule demands).
     _pad0: u32,
     _pad1: u32,
     _pad2: u32,
-    _pad3: u32,
-    _pad4: u32,
-    _pad5: u32,
 };
 
 const BORDER_TORUS: u32 = 0u;
@@ -69,6 +69,27 @@ struct BorderSample {
     y: u32,
     valid: u32,
 };
+
+// Reintegration overlap area I(x', x) for a single source-target cell
+// pair (paper Eq. 6 / JAX `reintegration_tracking.py:57-58`). Identical
+// formula to `flow_lenia_core::overlap::overlap_area` (M1.10).
+//
+//     I = (sz_x · sz_y) / (4 σ²)
+//
+// with `sz_a = clamp(0.5 − |dpmu_a| + σ, 0, min(1, 2σ))`. The
+// `min(1, 2σ)` upper clamp is correctness-critical for `σ > 0.5` (M1.10).
+//
+// `dpmu_*` is the **signed** distance from the distribution centre `μ`
+// to the target cell centre, in cells. `abs` is applied internally so
+// callers can pass the raw difference without an explicit `.abs()`.
+fn overlap_area(dpmu_y: f32, dpmu_x: f32, sigma: f32) -> f32 {
+    let abs_y = abs(dpmu_y);
+    let abs_x = abs(dpmu_x);
+    let upper = min(2.0 * sigma, 1.0);
+    let sz_y = clamp(0.5 - abs_y + sigma, 0.0, upper);
+    let sz_x = clamp(0.5 - abs_x + sigma, 0.0, upper);
+    return (sz_x * sz_y) / (4.0 * sigma * sigma);
+}
 
 // Resolve `(x, y)` against the grid `(w, h)` per `border`:
 //   - `BORDER_TORUS`: wrap modulo into `[0, w) × [0, h)`, `valid = 1`.

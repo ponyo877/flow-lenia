@@ -11,6 +11,7 @@ pub mod affinity_growth;
 pub mod convolve;
 pub mod flow;
 pub mod gradient;
+pub mod reintegrate;
 
 pub use affinity_growth::{
     upload_constant_weights, upload_localized_weights, AffinityGrowthPass, GpuConstantWeights,
@@ -19,3 +20,4 @@ pub use affinity_growth::{
 pub use convolve::ConvolvePass;
 pub use flow::FlowPass;
 pub use gradient::GradientPass;
+pub use reintegrate::ReintegratePass;

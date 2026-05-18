@@ -26,7 +26,7 @@ pub use kernel_buffers::{
 };
 pub use passes::{
     upload_constant_weights, upload_localized_weights, AffinityGrowthPass, ConvolvePass, FlowPass,
-    GpuConstantWeights, GradientPass, MAX_KERNELS,
+    GpuConstantWeights, GradientPass, ReintegratePass, MAX_KERNELS,
 };
 pub use readback::readback_buffer;
 
