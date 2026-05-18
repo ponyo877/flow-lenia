@@ -117,6 +117,19 @@ struct AppState {
     running: bool,
     fps: FpsCounter,
     steps_per_frame: u32,
+    /// M4.3 stats — the SidePanel reads these every frame; they're
+    /// updated lazily so the readback / FPS computation doesn't stall
+    /// the render loop. `current_fps` ticks once per second via
+    /// `FpsCounter::tick`'s side effect; `cached_mass` ticks every
+    /// `MASS_READBACK_INTERVAL` frames via `trigger_mass_readback`.
+    current_fps: f32,
+    cached_mass: Vec<f32>,
+    frames_until_mass_readback: u32,
+    mass_readback_in_flight: bool,
+    /// Held inside the state so the async mass-readback task can
+    /// post `AppEvent::MassReadbackDone(...)` back into the event
+    /// loop without borrowing `App`.
+    proxy: EventLoopProxy<AppEvent>,
     // ─── egui ──────────────────────────────────────────────────────
     egui_ctx: egui::Context,
     egui_winit_state: egui_winit::State,
@@ -136,7 +149,10 @@ impl FpsCounter {
         }
     }
 
-    fn tick(&mut self, step_count: u64, running: bool) {
+    /// Returns `Some(fps)` on the seconds where the per-second log
+    /// fires; `None` otherwise. Callers can use the value to update
+    /// the UI without computing FPS twice.
+    fn tick(&mut self, step_count: u64, running: bool) -> Option<f32> {
         self.frames += 1;
         let elapsed = self.last_report.elapsed();
         if elapsed.as_secs() >= 1 {
@@ -149,13 +165,25 @@ impl FpsCounter {
             );
             self.frames = 0;
             self.last_report = Instant::now();
+            Some(fps as f32)
+        } else {
+            None
         }
     }
 }
 
 enum AppEvent {
     GpuReady(Box<AppState>),
+    /// M4.3 — async readback of the per-channel activation sum.
+    /// Posted from `trigger_mass_readback` after `map_async` resolves.
+    MassReadbackDone(Vec<f32>),
 }
+
+/// Frames between successive `trigger_mass_readback` calls. 30 ≈
+/// 0.5 s at the ~60 Hz polling cycle, fast enough for the UI label
+/// to feel live but slow enough that the readback queue never
+/// backs up on its own.
+const MASS_READBACK_INTERVAL: u32 = 30;
 
 struct App {
     state: Option<AppState>,
@@ -189,9 +217,25 @@ impl ApplicationHandler<AppEvent> for App {
                 }
             }
             render_frame(state);
-            state.fps.tick(state.pipeline.step_count(), state.running);
+            // FpsCounter::tick logs once per second; capture the same
+            // value for the SidePanel label so we don't compute FPS
+            // twice.
+            if let Some(fps) = state.fps.tick(state.pipeline.step_count(), state.running) {
+                state.current_fps = fps;
+            }
+            // M4.3 — periodic activation readback, only while the
+            // simulation is moving. Paused state keeps the previously
+            // cached mass on screen.
+            if state.running {
+                state.frames_until_mass_readback =
+                    state.frames_until_mass_readback.saturating_sub(1);
+                if state.frames_until_mass_readback == 0 && !state.mass_readback_in_flight {
+                    trigger_mass_readback(state);
+                    state.frames_until_mass_readback = MASS_READBACK_INTERVAL;
+                }
+            }
             // M4.2: progress the device's internal queue so any
-            // outstanding `map_async` callbacks (e.g. the screenshot
+            // outstanding `map_async` callbacks (screenshot, mass
             // readback) can fire. On native this is implicit; on the
             // browser the wgpu runtime relies on us pumping it.
             let _ = state.gpu.device.poll(wgpu::PollType::Poll);
@@ -224,10 +268,11 @@ impl ApplicationHandler<AppEvent> for App {
         );
 
         let proxy = self.proxy.clone();
+        let proxy_for_state = self.proxy.clone();
         let window_for_async = Arc::clone(&window);
 
         wasm_bindgen_futures::spawn_local(async move {
-            let state = build_app_state(window_for_async).await;
+            let state = build_app_state(window_for_async, proxy_for_state).await;
             // Boxed because `AppState` is fairly large; passing it
             // through the user-event channel as a Box keeps the
             // event enum compact (winit copies it on every dispatch).
@@ -248,6 +293,12 @@ impl ApplicationHandler<AppEvent> for App {
                 // the next poll; no explicit request_redraw needed
                 // (and request_redraw is currently a no-op anyway —
                 // see the workaround note on `about_to_wait`).
+            }
+            AppEvent::MassReadbackDone(mass) => {
+                if let Some(state) = self.state.as_mut() {
+                    state.cached_mass = mass;
+                    state.mass_readback_in_flight = false;
+                }
             }
         }
     }
@@ -359,7 +410,7 @@ fn resolve_physical_canvas_size(window: &Window) -> (u32, u32) {
     }
 }
 
-async fn build_app_state(window: Arc<Window>) -> AppState {
+async fn build_app_state(window: Arc<Window>, proxy: EventLoopProxy<AppEvent>) -> AppState {
     // ─── wgpu context bound to the canvas surface ─────────────────
     // wgpu 29: `InstanceDescriptor::default()` was removed in favour
     // of explicit display-handle policy. The browser canvas surface
@@ -469,6 +520,13 @@ async fn build_app_state(window: Arc<Window>) -> AppState {
         running: true,
         fps: FpsCounter::new(),
         steps_per_frame: 1,
+        current_fps: 0.0,
+        cached_mass: vec![0.0; cfg.channels as usize],
+        // First readback fires on the very next frame so the panel
+        // shows a real value almost immediately after init.
+        frames_until_mass_readback: 1,
+        mass_readback_in_flight: false,
+        proxy,
         egui_ctx,
         egui_winit_state,
         egui_renderer,
@@ -494,7 +552,79 @@ fn reset_simulation(state: &mut AppState) {
         ),
     ];
     state.running = true;
+    // Force a fresh mass readback now so the SidePanel doesn't keep
+    // showing the pre-reset values for half a second.
+    state.frames_until_mass_readback = 1;
     log::info!("simulation reset (seed = {SEED})");
+}
+
+/// Copy the current activation buffer into a staging buffer, then
+/// post `AppEvent::MassReadbackDone(per_channel_sum)` once the
+/// `map_async` callback resolves. Cheap enough at our default 64×64×3
+/// = 49 KB readback that the frame budget is unaffected — see the
+/// M4.3 FPS measurements in the commit message.
+///
+/// Marks `state.mass_readback_in_flight = true`; the user_event
+/// handler clears the flag when it installs the new value.
+fn trigger_mass_readback(state: &mut AppState) {
+    state.mass_readback_in_flight = true;
+    let cfg = demo_cfg();
+    let channels = cfg.channels as usize;
+    let plane = (cfg.grid_width as usize) * (cfg.grid_height as usize);
+    let element_count = plane * channels;
+    let bytes = (element_count * std::mem::size_of::<f32>()) as wgpu::BufferAddress;
+
+    let device = state.gpu.device.clone();
+    let queue = state.gpu.queue.clone();
+    let activation_buf = state.pipeline.a_buffer(state.pipeline.ping_index()).clone();
+    let proxy = state.proxy.clone();
+
+    let staging = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("mass readback staging"),
+        size: bytes,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("mass readback encoder"),
+    });
+    encoder.copy_buffer_to_buffer(&activation_buf, 0, &staging, 0, bytes);
+    queue.submit([encoder.finish()]);
+
+    wasm_bindgen_futures::spawn_local(async move {
+        // Keep the device/queue/buffer handles alive across the await.
+        let _hold_activation = activation_buf;
+        let _hold_queue = queue;
+        let _hold_device = device;
+        let (sender, receiver) = futures_channel::oneshot::channel();
+        staging
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                let _ = sender.send(result);
+            });
+        match receiver.await {
+            Ok(Ok(())) => {}
+            other => {
+                log::warn!("mass map_async failed: {other:?}");
+                let _ = proxy.send_event(AppEvent::MassReadbackDone(vec![0.0; channels]));
+                return;
+            }
+        }
+        let mass: Vec<f32> = {
+            let mapped = staging.slice(..).get_mapped_range();
+            let activation: &[f32] = bytemuck::cast_slice(&mapped);
+            // GPU layout is `[C][H * W]` (M2.2 plan A); take per-channel
+            // sums by slicing into plane-sized chunks.
+            let mut out = Vec::with_capacity(channels);
+            for c in 0..channels {
+                let sum: f32 = activation[c * plane..(c + 1) * plane].iter().sum();
+                out.push(sum);
+            }
+            out
+        };
+        staging.unmap();
+        let _ = proxy.send_event(AppEvent::MassReadbackDone(mass));
+    });
 }
 
 /// 256-byte row alignment required by `copy_texture_to_buffer`. We
@@ -711,6 +841,8 @@ fn render_frame(state: &mut AppState) {
     // `state.egui_ctx.run` already holds the egui-side borrow).
     let running_before = state.running;
     let step_before = state.pipeline.step_count();
+    let fps_before = state.current_fps;
+    let mass_before = state.cached_mass.clone();
     let mut pause_clicked = false;
     let mut reset_clicked = false;
     let mut screenshot_clicked = false;
@@ -732,9 +864,17 @@ fn render_frame(state: &mut AppState) {
             .show(ctx, |ui| {
                 ui.heading("Flow-Lenia");
                 ui.separator();
+                // ─── Stats (M4.3) ──────────────────────────────────
+                ui.label(format!("FPS: {fps_before:.1}"));
                 ui.label(format!("Step: {step_before}"));
                 ui.label(format!("Seed: {SEED}"));
+                ui.add_space(4.0);
+                ui.label("Mass:");
+                for (c, &mass) in mass_before.iter().enumerate() {
+                    ui.label(format!("  C{c}: {mass:.2}"));
+                }
                 ui.separator();
+                // ─── Controls (M4.2) ────────────────────────────────
                 let pause_label = if running_before { "Pause" } else { "Resume" };
                 if ui.button(pause_label).clicked() {
                     pause_clicked = true;

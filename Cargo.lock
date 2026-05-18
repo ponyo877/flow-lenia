@@ -768,6 +768,7 @@ dependencies = [
 name = "flow-lenia-web"
 version = "0.0.1"
 dependencies = [
+ "bytemuck",
  "console_error_panic_hook",
  "console_log",
  "egui",

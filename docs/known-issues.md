@@ -74,3 +74,79 @@ repro that doesn't drag in our pipeline).
   watching for the step counter to advance.
 - If `egui-wgpu` releases a version targeting a different wgpu
   major, that bump may incidentally fix or change the symptom.
+
+## 2. Chrome WebGPU canvas: `canvas.toBlob` returns a black image
+
+### Symptom
+
+Calling `HTMLCanvasElement::to_blob` (Rust web-sys) or
+`canvas.toBlob()` (JS) on the canvas backing the WebGPU surface
+returns a `Blob` of the expected size but the decoded PNG is solid
+black.
+
+### Cause
+
+`GPUCanvasContext::getCurrentTexture` hands back a swap-chain
+texture that lives outside the 2D-canvas pipeline; Chrome's
+`toBlob` / `toDataURL` reach into the 2D-canvas backbuffer and
+therefore see nothing. Adding `wgpu::TextureUsages::COPY_SRC` to
+the surface configuration does not change the behaviour — the
+limit is on the read side, not on the wgpu side.
+
+### Workaround
+
+Render the same `VisualizePass` into a fresh `Rgba8Unorm` offscreen
+texture, `copy_texture_to_buffer` into a staging buffer with
+256-byte row alignment, `map_async` the buffer, strip the padding
+on the CPU, and feed the bytes to the `image` crate's PNG encoder.
+The encoded bytes go to the browser as a `Blob` and a synthesised
+`<a download>` triggers the file save. See
+`crates/flow-lenia-web/src/lib.rs::trigger_screenshot` for the full
+M4.2 implementation.
+
+A side benefit: the offscreen path captures the Flow-Lenia field
+*without* the egui SidePanel, which is exactly what we want for
+SNS sharing.
+
+### Scope of impact
+
+`flow-lenia-web` only. native binaries take screenshots through
+the existing `texture_readback` path with no surface involved.
+
+## 3. wgpu 29 (web) needs an explicit `Device::poll` to advance `map_async`
+
+### Symptom
+
+A `Buffer::map_async` callback never fires after the work is
+`queue.submit()`-ted — the awaiting `oneshot` receiver hangs
+forever, the readback path stalls, and (from the M4.2 / M4.3
+investigation) the screenshot / mass UI never refreshes.
+
+### Cause
+
+On native, the driver progresses the wgpu queue implicitly. On the
+browser the wgpu 29 runtime only advances its internal queue when
+the caller asks it to via `Device::poll`. Without the poll the
+internal "submitted → completed → fire map callback" pipeline
+never moves past the first step.
+
+### Workaround
+
+`flow-lenia-web` calls
+`state.gpu.device.poll(wgpu::PollType::Poll)` once per frame
+inside `ApplicationHandler::about_to_wait` (the same hook that
+already drives the workaround for issue #1). The cost is
+negligible — `PollType::Poll` is non-blocking and returns
+immediately when no submission is in flight.
+
+### Scope of impact
+
+Web only. Native readback paths still use `PollType::Wait` and
+block synchronously.
+
+### When to revisit
+
+If a wgpu release notes "implicit web queue progression", the
+explicit poll can move into the readback paths themselves (so it
+only costs CPU when there's an actual `map_async` in flight) or
+disappear entirely.

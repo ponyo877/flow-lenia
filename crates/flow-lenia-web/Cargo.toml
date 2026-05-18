@@ -47,6 +47,7 @@ egui-winit = { version = "0.34", default-features = false, features = ["links", 
 # slim (≈ 200 KB before wasm-opt).
 image = { version = "0.24", default-features = false, features = ["png"] }
 futures-channel = "0.3"
+bytemuck = { workspace = true }
 winit.workspace = true
 wasm-bindgen = "0.2.120"
 wasm-bindgen-futures = "0.4"
