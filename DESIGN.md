@@ -6,6 +6,16 @@
 
 ## Rev. 履歴
 
+### Rev.4.2 (2026-05、M2 完了時の方針変更)
+
+- **§8 マイルストーン順序を入れ替え**: M3 → M4 → **M6 → M5** に変更 (旧: M3 → M4 → M5 → M6)。理由: 「ブラウザで高速で最適化された Flow-Lenia」というゴールから逆算し、M5 進化探索を最適化済み GPU pipeline で実行する方が効率的。M5 完了後に creature 発見 + SNS 公開という流れに統一
+- **M3 サブステップ M3.1〜M3.5 を明記**: M3 を「最小 WASM ビルド → Hello WebGPU → 単一 compute pass → 全パイプライン統合 → ブラウザ互換性確認」の 5 段階に分解
+- **M3 完了条件を縮小**: Chrome stable で 64×64 / C=3 / |K|=10 動作確認のみ。Safari / Firefox は **状況報告のみ**。デプロイは外し M5 完了後に別途実施
+- **§10 Q9 (デプロイ) を更新**: 「ローカル `trunk serve` のみ」→「M5 完了後に GitHub Pages or Cloudflare Pages にデプロイ + SNS 公開」
+- **§10 Q1 (ブラウザ優先度) を補強**: M3 段階では Chrome stable のみ、Safari / Firefox は M5 後デプロイ時に再評価
+- **M6 内容を M5 前に前倒し**: FFT convolution (DESIGN.md §8 M6 optional stretch) + bind-group caching などの最適化を M5 進化探索の前段で実装。これにより M5 探索が高速化された pipeline 上で走るため、より多くの creature を時間内に発見可能
+- **M2 完了時点の実測値を §8 M6 の前提に反映**: 32×32 で GPU/CPU = 0.51×, 64×64 で 0.27×, 256×256 で 0.27× (BENCH.md 参照)。convolve が per-step 97.4% を占有することを発見、M6 FFT 化の量的根拠として記録
+
 ### Rev.4.1 (2026-05、M1.1 実装時の指摘)
 
 - Rust toolchain: 1.76 → **1.87** (transitive 依存の edition 2024 要求対応、wgpu 29 移行余地)
@@ -778,6 +788,21 @@ output: KernelParams = {
 
 ## 8. 段階的実装計画
 
+### プロジェクト完了像 (Rev.4.2 で再定義)
+
+すべての milestone (M1–M6) 完了時点で達成される最終像:
+
+- **ブラウザ完結**: Chrome stable で URL を踏むと即起動、WASM + WebGPU で動作
+- **最適化済み**: FFT-based convolution と GPU pipeline 最適化で
+  64×64 / C=3 で 60 FPS、128×128 / C=3 で 30 FPS
+- **インタラクティブ**: egui UI で grid size、mode、kernel 数等が動的変更可能
+- **creature 発見済み**: 進化的探索で論文 Figure 4 相当の creature を
+  発見、URL parameter でその creature を再現可能
+- **共有可能**: SNS で URL を共有すると、開いた人が同じ creature を観察できる
+
+M3 → M4 → M6 → M5 の順序で進め、M5 完了後に GitHub Pages or
+Cloudflare Pages にデプロイ。
+
 ### M1: CPU 版 Flow-Lenia がネイティブで動く
 
 **成果物**: `flow-lenia-core` の `cpu_reference.rs` で Eq. 1, 2, 3, 5, 6 を ndarray の**直接畳み込み**で素朴実装 (Rev.4: rustfft 不使用)
@@ -806,15 +831,24 @@ output: KernelParams = {
 - 4 モード組合せ (`paper_strict × border`) すべてでテスト通過
 - 回帰 fixture を 1 つ確定 (CPU 参照を黄金として保存)
 
-### M3: WASM ビルド + ブラウザ WebGPU 動作
+### M3: WASM ビルド + ブラウザ WebGPU 動作 (動作確認のみ、デプロイは M5 後)
 
-**成果物**: `trunk build --release` で `dist/` に成果物
+**成果物**: `trunk build --release` で `dist/` にローカル実行可能な成果物。**デプロイは M5 完了後に別途実施**。
 
-**完了条件**:
-- Chrome 最新版で WebGPU 経由で動く
-- M2 と同じシードで出力が一致 (visual diff + 質量チェック)
+**完了条件 (Rev.4.2 で縮小)**:
+- **Chrome stable** で 64×64 / C=3 / |K|=10 が動作 (M1.14 / M2.10 の seed=1729 が同じ rotating petal pattern を見せる)
+- **Safari / Firefox は状況報告のみ** (動けば良し、動かなければ M5 後デプロイ時に再対応)
 - WebGPU 非対応ブラウザでフォールバックエラー表示
 - adapter limits 取得 + UI 動的制限 (512² 無効化等)
+- 検証方針 (M2 と同じ二重ガード): **5-10 step trajectory CPU vs WASM-GPU で rel < 1e-4 OR abs < 1e-5**、**100 step mass conservation で rel < 1e-3 (torus) / 1e-2 (wall)**。Chrome の WebGPU 実装が native Metal と異なる加算順序で chaotic drift を起こすのは正常 (M2.8 verify 参照)
+
+#### M3 サブステップ (Rev.4.2 追加)
+
+- **M3.1 最小 WASM ビルド**: `flow-lenia-core` の純粋計算部分 (compute_kernel, growth, sum_channels 等の non-GPU 部分) を `wasm32-unknown-unknown` でビルド可能にし、Node.js / wasm-pack でユニットテストが通る
+- **M3.2 Hello WebGPU**: M2.1 の `native_gpu` 相当 (青い画面のみ) を Chrome stable で表示。`web-sys` + `wasm-bindgen` + `wgpu` の wasm32 ターゲット組合せの sanity check
+- **M3.3 単一 compute pass WASM**: M2.3 convolve pass を WASM 上で走らせ、readback 結果を CPU 参照と相対誤差 < 1e-4 で一致確認
+- **M3.4 全パイプライン + visualize WASM 統合**: M2.10 の `native_gpu` 相当 (seed=1729 で creature animation) を Chrome stable で動作確認
+- **M3.5 Chrome stable 動作確認 + Safari/Firefox 状況報告**: M3.4 完了状態を Chrome stable で 30 秒以上走らせて mass conservation を確認、Safari/Firefox は試行のみ (動作・非動作・部分動作を README で報告)
 
 ### M4: UI 統合・リアルタイム可視化
 
@@ -825,17 +859,7 @@ output: KernelParams = {
 - 128×128 / C=3 / |K|=45 で 30 FPS 以上 (実測ベンチ)
 - 最低 1 つ「明らかに動く creature」が見える固定シードのデモを README に掲載
 
-### M5: パラメータ埋め込み・マルチ種シミュレーション
-
-**成果物**: Eq. 7, Eq. 8 (stochastic & deterministic) の有効化、multi-patch 初期配置、変異ビーム
-
-**完了条件**:
-- parameter embedding ON で `tests/mass_conservation.rs` グリーン
-- UI から多体配置 (64 creatures × ランダム seeds) を生成可能
-- 変異ビーム実装で `test_mutation_beam` グリーン (M1 から既存だが、ここで実機統合)
-- 数千ステップ走らせて、視覚的に「種が交代する」様子が観察可能
-
-### M6: 性能チューニング・ドキュメント整備
+### M6: 性能チューニング (Rev.4.2 で M5 の前に前倒し)
 
 **成果物**:
 - 256×256 / C=3 / |K|=45 で 60 FPS 達成 (Apple M1 想定)
@@ -846,13 +870,38 @@ output: KernelParams = {
 - ベンチ表 (grid_size × C × |K| × backend × paper_strict での FPS) を README に
 - シェーダ内の論文式番号コメントが全パスに揃っている
 
-#### M6 optional stretch (Rev.4 追加)
+**M2.11 実測の前提** (Rev.4.2 追加):
+- 32×32 / C=3 で GPU/CPU = 0.58× (GPU 1.7× 速い)
+- 64×64 / C=3 で 16.3 ms/step ≈ 61 sps
+- 128×128 / C=3 で 58.5 ms/step ≈ 17 sps
+- 256×256 / C=3 で 230 ms/step ≈ 4.3 sps
+- **convolve pass が per-step 97.4% を占有** (BENCH.md §2) → FFT 化が M6 最重要ターゲット
+
+#### M6 optional stretch (Rev.4 追加 / Rev.4.2 で前倒し)
 
 - **GPU FFT 化** (torus 境界限定): Stockham カーネル × 2 軸、複素 f32
-  - 256² で 60 FPS を非 FFT で達成できない場合に実装
+  - 256² で 60 FPS を非 FFT で達成できない場合に実装 (M2.11 実測で必須)
   - 完了条件: 256² / `paper_strict=OFF` で 60 FPS 達成
   - **JAX とのビット精度近似テスト**: 固定パラメータで JAX と本実装 (FFT モード) の `A^100` を比較、相対誤差 < 1e-4
+- **bind-group caching** (M2.10 の per-frame visualize BG 再構築コスト削減)
 - 散逸モデル / 食物モデル (論文 §4.3.2) は M6 stretch のままに維持
+
+### M5: パラメータ埋め込み・マルチ種シミュレーション + creature 発見 (Rev.4.2 で M6 の後に移動)
+
+**成果物**: Eq. 7, Eq. 8 (stochastic & deterministic) の有効化、multi-patch 初期配置、変異ビーム、**最適化済み GPU pipeline 上での進化探索**
+
+**完了条件**:
+- parameter embedding ON で `tests/mass_conservation.rs` グリーン
+- UI から多体配置 (64 creatures × ランダム seeds) を生成可能
+- 変異ビーム実装で `test_mutation_beam` グリーン (M1 から既存だが、ここで実機統合)
+- 数千ステップ走らせて、視覚的に「種が交代する」様子が観察可能
+- **進化探索で論文 Figure 4 相当の creature を少なくとも 1 個発見**
+
+### [M5 後] デプロイ + SNS 公開 (Rev.4.2 追加)
+
+- **GitHub Pages or Cloudflare Pages** に WASM 成果物をデプロイ
+- 発見した creature を固定 seed として URL parameter で再現可能に
+- SNS (X / Bluesky) で公開、reproduction URL 付き
 
 ---
 
@@ -875,7 +924,7 @@ output: KernelParams = {
 
 | Q# | 内容 | Rev.4 確定値 |
 |---|---|---|
-| Q1 | ブラウザ優先度 | Chrome 最優先、Safari 次点、Firefox 145+ ベストエフォート |
+| Q1 | ブラウザ優先度 | **M3 段階: Chrome stable のみ**、Safari/Firefox は状況報告のみ (Rev.4.2)。M5 後デプロイ時に再評価 |
 | Q1A | Chebyshev 距離 | **11×11** (`-5..=5`)、`dd` UI 可変 (3..=7) |
 | Q2 | ネイティブ基準 OS/GPU | Apple Silicon (Metal) |
 | Q3 | α/β_A/n の式 | **デフォルト JAX 互換** (per-channel α, β_A=2.0, n=2 固定)、`paper_strict=ON` で論文 Eq. 5 (全 C 共通 α、A_Σ ベース、n 可変)。`β_A`, `n` は両モードで UI 可変 |
@@ -887,7 +936,7 @@ output: KernelParams = {
 | Q6 | 境界条件 | デフォルト `torus`、UI で `wall` 切替、Sobel も border 追従。**初期パッチは画面中心 ± grid_size/4 に配置制限** |
 | Q7 | FFT | **M1/M2 は CPU/GPU とも直接畳み込み**、`rustfft` 削除。**M6 optional で torus 限定 GPU FFT 化**、JAX ビット精度近似テスト追加 |
 | Q8 | 量子化/f16 | f32 のみ |
-| Q9 | デプロイ | ローカル `trunk serve` のみ |
+| Q9 | デプロイ | **Rev.4.2**: M3 段階はローカル `trunk serve` のみ、**M5 完了後**に GitHub Pages or Cloudflare Pages にデプロイ + SNS 公開 |
 
 ---
 
