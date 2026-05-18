@@ -13,8 +13,8 @@ workspace = true
 [dependencies]
 ndarray.workspace = true
 rand.workspace = true
+rand_chacha.workspace = true
 bytemuck.workspace = true
 
 [dev-dependencies]
 approx.workspace = true
-rand_chacha.workspace = true

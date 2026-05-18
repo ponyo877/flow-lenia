@@ -75,6 +75,11 @@ pub struct FlowLeniaConfig {
     /// (JAX `Config.dd = 5`; allowed UI range 3..=7;
     /// see `JAX_NOTES.md` §1).
     pub dd: u32,
+    /// Number of kernels `|K|` in the kernel bank. Drives random
+    /// sampling in the simulator (M1.14); does not directly constrain
+    /// any function in `step()`, which receives the kernels as an
+    /// explicit slice.
+    pub num_kernels: u32,
 
     // --- Mode switches ---
     /// If `true`, use the paper Eq. 5 / Eq. 8 formulas verbatim
@@ -102,9 +107,31 @@ impl Default for FlowLeniaConfig {
             n: 2.0,
             beta_a: 2.0,
             dd: 5,
+            num_kernels: 10,
             paper_strict: false,
             border: BorderMode::Torus,
             mix_rule: MixRule::Stochastic,
+        }
+    }
+}
+
+impl FlowLeniaConfig {
+    /// Smaller config for demos / interactive runs (M1.14 binary and
+    /// the M2 GPU window). 64×64 keeps frame times manageable on a
+    /// pure-CPU step loop while still exposing creature-scale
+    /// structure.
+    ///
+    /// Differs from [`FlowLeniaConfig::default`] only in `grid_*` and
+    /// `num_kernels` — physical parameters, modes, and `dd` are the
+    /// same so toggling between default and demo doesn't silently
+    /// re-tune the dynamics.
+    #[must_use]
+    pub fn demo_default() -> Self {
+        Self {
+            grid_width: 64,
+            grid_height: 64,
+            num_kernels: 10,
+            ..Self::default()
         }
     }
 }
@@ -131,6 +158,7 @@ mod tests {
         approx::assert_relative_eq!(cfg.n, 2.0, epsilon = 1e-9);
         approx::assert_relative_eq!(cfg.beta_a, 2.0, epsilon = 1e-9);
         assert_eq!(cfg.dd, 5, "dd default must be 5 (JAX Config.dd)");
+        assert_eq!(cfg.num_kernels, 10, "num_kernels default must be 10");
 
         // Mode flags — paper_strict=false is "JAX compatible" for both α
         // (DESIGN.md §4.1.5) and Eq. 8 softmax (DESIGN.md §4.1.6).
@@ -140,6 +168,27 @@ mod tests {
         );
         assert_eq!(cfg.border, BorderMode::Torus);
         assert_eq!(cfg.mix_rule, MixRule::Stochastic);
+    }
+
+    /// `demo_default()` differs only in grid size; everything else
+    /// matches `default()` so toggling between presets does not change
+    /// the dynamics.
+    #[test]
+    fn demo_default_matches_default_for_physical_params() {
+        let demo = FlowLeniaConfig::demo_default();
+        let dflt = FlowLeniaConfig::default();
+        assert_eq!(demo.grid_width, 64);
+        assert_eq!(demo.grid_height, 64);
+        assert_eq!(demo.channels, dflt.channels);
+        approx::assert_relative_eq!(demo.dt, dflt.dt, epsilon = 1e-9);
+        approx::assert_relative_eq!(demo.sigma, dflt.sigma, epsilon = 1e-9);
+        approx::assert_relative_eq!(demo.n, dflt.n, epsilon = 1e-9);
+        approx::assert_relative_eq!(demo.beta_a, dflt.beta_a, epsilon = 1e-9);
+        assert_eq!(demo.dd, dflt.dd);
+        assert_eq!(demo.num_kernels, dflt.num_kernels);
+        assert_eq!(demo.paper_strict, dflt.paper_strict);
+        assert_eq!(demo.border, dflt.border);
+        assert_eq!(demo.mix_rule, dflt.mix_rule);
     }
 
     /// Sanity-check that the enums are `Copy` + `Eq`-comparable (these are

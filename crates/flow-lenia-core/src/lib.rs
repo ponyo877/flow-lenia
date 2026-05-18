@@ -17,6 +17,7 @@ pub mod kernel;
 pub mod overlap;
 pub mod params;
 pub mod reintegrate;
+pub mod simulator;
 pub mod sobel;
 pub mod state;
 pub mod step;
@@ -30,6 +31,7 @@ pub use kernel::{compute_kernel, effective_radius, sigmoid, KernelMeta};
 pub use overlap::overlap_area;
 pub use params::{KernelEntry, KernelParams, SamplingSettings};
 pub use reintegrate::reintegrate;
+pub use simulator::FlowLeniaSimulator;
 pub use sobel::{grad_a_sum, sobel, sobel_per_channel, sobel_x, sobel_y, SobelGradients};
 pub use state::{
     sum_channels, ActivationField, AlphaField, FlowField, FlowFieldExt, UField, AXIS_C, AXIS_FLOW,
