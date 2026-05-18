@@ -13,6 +13,7 @@ pub mod config_border;
 pub mod globals;
 pub mod kernel_buffers;
 pub mod passes;
+pub mod pipeline;
 pub mod readback;
 
 pub use activation_buffer::{
@@ -28,6 +29,7 @@ pub use passes::{
     upload_constant_weights, upload_localized_weights, AffinityGrowthPass, ConvolvePass, FlowPass,
     GpuConstantWeights, GradientPass, ReintegratePass, MAX_KERNELS,
 };
+pub use pipeline::GpuStepPipeline;
 pub use readback::readback_buffer;
 
 /// Owns the four core `wgpu` handles the rest of the crate (and the

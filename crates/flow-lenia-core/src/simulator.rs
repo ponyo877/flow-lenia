@@ -209,6 +209,15 @@ impl FlowLeniaSimulator {
         &self.cfg
     }
 
+    /// Sampled kernel-bank parameters. Exposed so a downstream GPU
+    /// pipeline (M2.8) can reuse the same `(cfg, seed)` initial state
+    /// as the CPU simulator and have its run be directly comparable
+    /// to M1.15 regression fixtures.
+    #[must_use]
+    pub fn kernel_params(&self) -> &KernelParams {
+        &self.kernel_params
+    }
+
     /// Per-channel total mass `Σ_{y,x} A_c(y, x)`. Accumulated in `f64`
     /// internally to keep the result robust against grid-size growth,
     /// then cast back to `f32` per the value's natural type.
