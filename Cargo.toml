@@ -5,6 +5,7 @@ members = [
     "crates/flow-lenia-gpu",
     "crates/flow-lenia-ui",
     "crates/flow-lenia-app",
+    "crates/flow-lenia-web",
 ]
 
 [workspace.package]

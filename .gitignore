@@ -8,6 +8,11 @@
 /pkg/
 .trunk/
 wasm-pack.log
+# Trunk build artefacts also land inside each crate's own
+# `dist/`/`pkg/` (e.g. `crates/flow-lenia-web/dist/`); the leading
+# `/` form above only matches the workspace root.
+**/dist/
+**/pkg/
 
 # Node (任意で frontend tooling を入れる場合)
 /node_modules/

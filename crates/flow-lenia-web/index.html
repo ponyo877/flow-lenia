@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Flow-Lenia (M3.2)</title>
+  <link data-trunk rel="rust" data-wasm-opt="z" />
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: #111;
+      color: #ccc;
+      font-family: system-ui, sans-serif;
+    }
+    body {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding-top: 24px;
+      min-height: 100vh;
+    }
+    h1 {
+      font-size: 16px;
+      font-weight: 500;
+      margin: 0 0 16px;
+    }
+    canvas {
+      display: block;
+      background: #000;
+      image-rendering: pixelated;
+    }
+    .hint {
+      margin-top: 16px;
+      font-size: 12px;
+      color: #888;
+    }
+  </style>
+</head>
+<body>
+  <h1>Flow-Lenia · M3.2 Hello WebGPU</h1>
+  <canvas id="flow-lenia-canvas" width="512" height="512"></canvas>
+  <p class="hint">
+    A solid blue canvas means wgpu reached the browser via WebGPU.
+    Adapter info is logged to the DevTools console.
+  </p>
+</body>
+</html>

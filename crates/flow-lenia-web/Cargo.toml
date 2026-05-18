@@ -1,0 +1,37 @@
+[package]
+name = "flow-lenia-web"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+# `cdylib` produces the `.wasm` binary that `wasm-bindgen` instruments
+# and `trunk` then bundles. `rlib` lets `cargo check`/`clippy` see this
+# crate as a normal Rust library on the host toolchain so we get
+# diagnostics even without targeting wasm32.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+flow-lenia-core.workspace = true
+# WGSL only on the web — WebGPU is the backend, no Metal/Vulkan need
+# enabling. `default-features = false` strips out backend crates we
+# don't ship in WASM.
+wgpu = { version = "25.0.2", default-features = false, features = ["webgpu", "wgsl"] }
+winit.workspace = true
+wasm-bindgen = "0.2.120"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = [
+    "Document",
+    "Window",
+    "HtmlCanvasElement",
+] }
+js-sys = "0.3"
+console_error_panic_hook = "0.1"
+log = "0.4"
+console_log = "1.0"
