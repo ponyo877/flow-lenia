@@ -1,44 +1,76 @@
 #![deny(warnings)]
-//! Native GPU binary for Flow-Lenia.
+//! Native GPU binary for Flow-Lenia (M2.10 full implementation).
 //!
-//! M2.1 lands the minimum viable wgpu pipeline: a winit window with a
-//! wgpu surface that clears to a flat blue colour every frame. No
-//! compute passes, no Flow-Lenia state on the GPU yet — those land
-//! in M2.2 .. M2.10.
+//! Opens a 512×512 winit window backed by a wgpu sRGB surface and
+//! runs the M2.8 `GpuStepPipeline` continuously, rendering each
+//! frame via the M2.9 `VisualizePass`. Keyboard:
+//!
+//! ```text
+//!   Space : pause / resume simulation
+//!   r     : reset to fresh `(cfg, seed)` initial state
+//!   q     : quit
+//! ```
 //!
 //! Usage:
 //!
 //! ```text
-//! RUST_LOG=info cargo run --release --bin native_gpu
+//! cargo run --release --bin native_gpu -- [steps_per_frame=1] [seed=1729]
 //! ```
 //!
-//! Logs the selected adapter and the rolling 1-second FPS to stderr.
-//! Window closes via the usual platform shortcuts (Cmd-Q / Alt-F4 /
-//! close button).
+//! Defaults: `steps_per_frame = 1`, `seed = 1729` (the M1.14 / M2.9
+//! visualisation reference seed). Logs `step / fps` every second via
+//! `env_logger` (initialised at `info`).
 
-use flow_lenia_gpu::{GpuContext, SurfaceState};
+use flow_lenia_core::{
+    config::{BorderMode, FlowLeniaConfig, MixRule},
+    FlowLeniaSimulator,
+};
+use flow_lenia_gpu::{GpuContext, GpuStepPipeline, VisualizePass};
 use std::sync::Arc;
 use std::time::Instant;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::WindowEvent;
+use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowAttributes, WindowId};
 
-/// All state that depends on a window existing.
-///
-/// Held inside `App` as an `Option` because winit's lifecycle only
-/// guarantees a window after the `resumed` callback fires.
-struct Render {
-    window: Arc<Window>,
-    surface: wgpu::Surface<'static>,
-    config: wgpu::SurfaceConfiguration,
-    gpu: GpuContext,
+const WINDOW_W: u32 = 512;
+const WINDOW_H: u32 = 512;
+const GRID_W: u32 = 64;
+const GRID_H: u32 = 64;
+const UPSCALE: u32 = WINDOW_W / GRID_W; // = 8
+
+fn default_cfg() -> FlowLeniaConfig {
+    FlowLeniaConfig {
+        grid_width: GRID_W,
+        grid_height: GRID_H,
+        channels: 3,
+        dt: 0.2,
+        sigma: 0.65,
+        n: 2.0,
+        beta_a: 2.0,
+        dd: 5,
+        num_kernels: 10,
+        paper_strict: false,
+        border: BorderMode::Torus,
+        mix_rule: MixRule::Stochastic,
+    }
 }
 
-struct App {
-    render: Option<Render>,
-    fps_counter: FpsCounter,
+/// All state that depends on a window existing.
+struct AppState {
+    window: Arc<Window>,
+    surface: wgpu::Surface<'static>,
+    surface_config: wgpu::SurfaceConfiguration,
+    gpu: GpuContext,
+    pipeline: GpuStepPipeline,
+    visualize: VisualizePass,
+    visualize_globals_buf: wgpu::Buffer,
+    cfg: FlowLeniaConfig,
+    seed: u64,
+    running: bool,
+    fps: FpsCounter,
 }
 
 struct FpsCounter {
@@ -54,13 +86,14 @@ impl FpsCounter {
         }
     }
 
-    fn tick(&mut self) {
+    fn tick(&mut self, step_count: u64, running: bool) {
         self.frames += 1;
         let elapsed = self.last_report.elapsed();
-        if elapsed.as_secs_f64() >= 1.0 {
+        if elapsed.as_secs() >= 1 {
+            let fps = f64::from(self.frames) / elapsed.as_secs_f64();
+            let pause = if running { "" } else { " [paused]" };
             log::info!(
-                "fps={:.1} ({} frames in {:.3}s)",
-                f64::from(self.frames) / elapsed.as_secs_f64(),
+                "step={step_count} fps={fps:.1}  ({} frames in {:.3}s){pause}",
                 self.frames,
                 elapsed.as_secs_f64()
             );
@@ -70,33 +103,95 @@ impl FpsCounter {
     }
 }
 
+struct App {
+    state: Option<AppState>,
+    steps_per_frame: u32,
+    seed: u64,
+}
+
+impl App {
+    fn new(steps_per_frame: u32, seed: u64) -> Self {
+        Self {
+            state: None,
+            steps_per_frame,
+            seed,
+        }
+    }
+}
+
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        // `resumed` can fire multiple times on some platforms (mobile);
-        // guard so we only build the renderer once.
-        if self.render.is_some() {
-            return;
+        if self.state.is_some() {
+            return; // Mobile platforms can re-fire `resumed`.
         }
 
+        // 1. Window — fixed size, non-resizable (M4 will add resize support).
         let attrs = WindowAttributes::default()
-            .with_title("flow-lenia native_gpu (M2.1)")
-            .with_inner_size(LogicalSize::new(640u32, 480u32));
+            .with_title("Flow-Lenia (M2.10)")
+            .with_inner_size(LogicalSize::new(WINDOW_W, WINDOW_H))
+            .with_resizable(false);
         let window = Arc::new(
             event_loop
                 .create_window(attrs)
                 .expect("failed to create window"),
         );
+
+        // 2. Manual surface + adapter selection so we can pick an sRGB
+        //    swapchain format (gamma correction comes free, no manual
+        //    `pow(c, 1/2.2)` in the fragment shader).
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let surface = instance
+            .create_surface(window.clone())
+            .expect("failed to create wgpu surface");
+        let gpu = GpuContext::new_blocking(instance, Some(&surface));
+
+        let caps = surface.get_capabilities(&gpu.adapter);
+        let format = caps
+            .formats
+            .iter()
+            .copied()
+            .find(wgpu::TextureFormat::is_srgb)
+            .unwrap_or(caps.formats[0]);
+        log::info!("surface format: {format:?}");
         let size = window.inner_size();
+        let surface_config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width: size.width.max(1),
+            height: size.height.max(1),
+            present_mode: caps.present_modes[0], // Fifo by default
+            desired_maximum_frame_latency: 2,
+            alpha_mode: caps.alpha_modes[0],
+            view_formats: vec![],
+        };
+        surface.configure(&gpu.device, &surface_config);
 
-        let (gpu, SurfaceState { surface, config }) = flow_lenia_gpu::block_on(
-            GpuContext::with_surface(window.clone(), size.width, size.height),
-        );
+        // 3. CPU-side initial state. The simulator does the central-
+        //    patch seeding from `(cfg, seed)` for us; we reuse its
+        //    activation + kernel_params to build the GPU pipeline.
+        let cfg = default_cfg();
+        let cpu_sim = FlowLeniaSimulator::new(cfg, self.seed);
+        let initial_a = cpu_sim.activation().clone();
+        let kernel_params = cpu_sim.kernel_params().clone();
+        let pipeline = GpuStepPipeline::new(&gpu, &cfg, &kernel_params, &initial_a);
 
-        self.render = Some(Render {
+        // 4. VisualizePass — sized for the swapchain format with the
+        //    fixed `UPSCALE` factor.
+        let visualize = VisualizePass::new(&gpu, format, UPSCALE);
+        let visualize_globals_buf = visualize.upload_globals(&gpu, GRID_H, GRID_W, cfg.channels);
+
+        self.state = Some(AppState {
             window,
             surface,
-            config,
+            surface_config,
             gpu,
+            pipeline,
+            visualize,
+            visualize_globals_buf,
+            cfg,
+            seed: self.seed,
+            running: true,
+            fps: FpsCounter::new(),
         });
     }
 
@@ -106,40 +201,79 @@ impl ApplicationHandler for App {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
-        let Some(render) = self.render.as_mut() else {
+        let Some(state) = self.state.as_mut() else {
             return;
         };
         match event {
             WindowEvent::CloseRequested => {
-                log::info!("close requested — exiting");
+                log::info!(
+                    "close requested at step={} — exiting",
+                    state.pipeline.step_count()
+                );
                 event_loop.exit();
             }
-            WindowEvent::Resized(size) => {
-                // Skip 0-sized surfaces (minimised windows) — they panic in `configure`.
-                if size.width == 0 || size.height == 0 {
-                    return;
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        logical_key,
+                        state: ElementState::Pressed,
+                        repeat: false,
+                        ..
+                    },
+                ..
+            } => match logical_key.as_ref() {
+                Key::Named(NamedKey::Space) => {
+                    state.running = !state.running;
+                    log::info!(
+                        "{} at step={}",
+                        if state.running { "resumed" } else { "paused" },
+                        state.pipeline.step_count()
+                    );
                 }
-                render.config.width = size.width;
-                render.config.height = size.height;
-                render.surface.configure(&render.gpu.device, &render.config);
-            }
+                Key::Character("r") | Key::Character("R") => {
+                    reset_simulation(state);
+                }
+                Key::Character("q") | Key::Character("Q") => {
+                    log::info!("q pressed — exiting");
+                    event_loop.exit();
+                }
+                _ => {}
+            },
             WindowEvent::RedrawRequested => {
-                render_frame(render);
-                self.fps_counter.tick();
-                // Continuous redraw — request the next frame.
-                render.window.request_redraw();
+                if state.running {
+                    for _ in 0..self.steps_per_frame {
+                        state.pipeline.step(&state.gpu);
+                    }
+                }
+                render_frame(state);
+                state.fps.tick(state.pipeline.step_count(), state.running);
+                state.window.request_redraw();
             }
             _ => {}
         }
     }
 }
 
-fn render_frame(render: &mut Render) {
-    let frame = match render.surface.get_current_texture() {
-        Ok(frame) => frame,
+/// Re-build the GPU pipeline from a fresh `(cfg, seed)` simulator.
+/// Simpler than tracking individual buffer resets — pipeline
+/// construction is fast (≈ tens of ms; M2.7 measured 10 ms for the
+/// fixture generator across 8 cases).
+fn reset_simulation(state: &mut AppState) {
+    let cpu_sim = FlowLeniaSimulator::new(state.cfg, state.seed);
+    let initial_a = cpu_sim.activation().clone();
+    let kernel_params = cpu_sim.kernel_params().clone();
+    state.pipeline = GpuStepPipeline::new(&state.gpu, &state.cfg, &kernel_params, &initial_a);
+    state.running = true;
+    log::info!("simulation reset (seed = {})", state.seed);
+}
+
+fn render_frame(state: &mut AppState) {
+    let frame = match state.surface.get_current_texture() {
+        Ok(f) => f,
         Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-            // Re-configure and try again next frame.
-            render.surface.configure(&render.gpu.device, &render.config);
+            state
+                .surface
+                .configure(&state.gpu.device, &state.surface_config);
             return;
         }
         Err(e) => {
@@ -150,51 +284,48 @@ fn render_frame(render: &mut Render) {
     let view = frame
         .texture
         .create_view(&wgpu::TextureViewDescriptor::default());
-    let mut encoder = render
+
+    // The bind group is rebuilt every frame because
+    // `pipeline.current_activation_buffer()` alternates between the
+    // two ping-pong A buffers — wgpu bind groups are immutable, so we
+    // must build the one pointing at the buffer we actually want to
+    // read this frame. Bind-group construction is ~µs on Apple M1.
+    let bind_group = state.visualize.make_bind_group(
+        &state.gpu,
+        state.pipeline.current_activation_buffer(),
+        &state.visualize_globals_buf,
+    );
+
+    let mut encoder = state
         .gpu
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("M2.1 clear-blue encoder"),
+            label: Some("M2.10 frame encoder"),
         });
-    {
-        // Scoped so the borrow on `encoder` drops before `encoder.finish()`.
-        let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("M2.1 clear-blue pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &view,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 0.05,
-                        g: 0.15,
-                        b: 0.85,
-                        a: 1.0,
-                    }),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-        });
-    }
-    render.gpu.queue.submit([encoder.finish()]);
+    state.visualize.record(&mut encoder, &bind_group, &view);
+    state.gpu.queue.submit([encoder.finish()]);
     frame.present();
 }
 
 fn main() {
-    // Default to "info" so the adapter and FPS log lines actually appear.
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
+    let steps_per_frame: u32 = std::env::args()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
+    let seed: u64 = std::env::args()
+        .nth(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1729);
+    log::info!("steps_per_frame={steps_per_frame}  seed={seed}");
+
     let event_loop = EventLoop::new().expect("failed to create event loop");
-    // Poll (not Wait) so we drive continuous redraws — vsync inside the
-    // surface's present blocks naturally.
+    // `Poll` (not `Wait`) so we drive a continuous redraw cycle — the
+    // present mode (Fifo / vsync) provides natural throttling.
     event_loop.set_control_flow(ControlFlow::Poll);
 
-    let mut app = App {
-        render: None,
-        fps_counter: FpsCounter::new(),
-    };
+    let mut app = App::new(steps_per_frame, seed);
     event_loop
         .run_app(&mut app)
         .expect("event loop terminated with error");
