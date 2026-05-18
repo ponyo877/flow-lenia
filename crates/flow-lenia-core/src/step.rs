@@ -306,12 +306,7 @@ mod tests {
     /// the *max* over the trajectory (not just the final-step value)
     /// gives the assertion bite — a fix that only stabilises late
     /// would not silently pass.
-    fn run_mass_drift(
-        cfg: &FlowLeniaConfig,
-        num_kernels: u32,
-        n_steps: usize,
-        seed: u64,
-    ) -> f64 {
+    fn run_mass_drift(cfg: &FlowLeniaConfig, num_kernels: u32, n_steps: usize, seed: u64) -> f64 {
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
 
         // Kernel parameters — use sample_random for a realistic mix.

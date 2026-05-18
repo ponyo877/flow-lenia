@@ -253,8 +253,10 @@ mod tests {
                 sigma: 0.04,
             },
         ];
-        let kernels: Vec<Array2<f32>> =
-            entries.iter().map(|e| compute_kernel(r_global, e)).collect();
+        let kernels: Vec<Array2<f32>> = entries
+            .iter()
+            .map(|e| compute_kernel(r_global, e))
+            .collect();
         let meta: Vec<KernelMeta> = entries
             .iter()
             .map(|e| KernelMeta {
@@ -421,8 +423,16 @@ mod tests {
                 assert_relative_eq!(u[[y, x, 2]], 0.0, epsilon = 1e-6);
                 // Sanity: with these growth params, ch0 and ch1 sit near
                 // −(h_0 + h_1) = −0.8 and −h_2 = −0.9 respectively.
-                assert!(u[[y, x, 0]] < -0.7, "U_0 = {} (expected near -0.8)", u[[y, x, 0]]);
-                assert!(u[[y, x, 1]] < -0.85, "U_1 = {} (expected near -0.9)", u[[y, x, 1]]);
+                assert!(
+                    u[[y, x, 0]] < -0.7,
+                    "U_0 = {} (expected near -0.8)",
+                    u[[y, x, 0]]
+                );
+                assert!(
+                    u[[y, x, 1]] < -0.85,
+                    "U_1 = {} (expected near -0.9)",
+                    u[[y, x, 1]]
+                );
             }
         }
     }
@@ -450,8 +460,7 @@ mod tests {
         for y in 0..height {
             for x in 0..width {
                 for ci in 0..channels {
-                    a[[y, x, ci]] =
-                        ((y * 13 + x * 7 + ci * 31) % 17) as f32 / 17.0;
+                    a[[y, x, ci]] = ((y * 13 + x * 7 + ci * 31) % 17) as f32 / 17.0;
                 }
             }
         }
@@ -466,10 +475,8 @@ mod tests {
             }
         }
 
-        let u_eq3 =
-            affinity_with_constant_weights(&a, &kernels, &meta, &h, BorderMode::Torus);
-        let u_eq7 =
-            affinity_with_localized_weights(&a, &kernels, &meta, &p_map, BorderMode::Torus);
+        let u_eq3 = affinity_with_constant_weights(&a, &kernels, &meta, &h, BorderMode::Torus);
+        let u_eq7 = affinity_with_localized_weights(&a, &kernels, &meta, &p_map, BorderMode::Torus);
 
         assert_eq!(u_eq3.dim(), u_eq7.dim());
         for ((y, x, ci), &v3) in u_eq3.indexed_iter() {
@@ -500,7 +507,6 @@ mod tests {
         let (kernels, meta, _h) = three_kernel_setup();
         let a: ActivationField = Array3::zeros((4, 4, 3));
         let bad_p: Array3<f32> = Array3::zeros((4, 4, kernels.len() + 1));
-        let _ =
-            affinity_with_localized_weights(&a, &kernels, &meta, &bad_p, BorderMode::Torus);
+        let _ = affinity_with_localized_weights(&a, &kernels, &meta, &bad_p, BorderMode::Torus);
     }
 }

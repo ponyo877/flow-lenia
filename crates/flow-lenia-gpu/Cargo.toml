@@ -16,4 +16,9 @@ wgpu.workspace = true
 bytemuck.workspace = true
 glam.workspace = true
 log.workspace = true
+ndarray.workspace = true
 pollster.workspace = true
+
+[dev-dependencies]
+rand.workspace = true
+rand_chacha.workspace = true

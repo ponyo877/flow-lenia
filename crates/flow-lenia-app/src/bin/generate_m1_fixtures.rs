@@ -111,8 +111,13 @@ fn write_manifest(dir: &Path, cases: &[Case], total_elapsed_ms: u128) {
     out.push_str("{\n");
     out.push_str(&format!("  \"generated_at\": \"{today}\",\n"));
     out.push_str("  \"rust_toolchain\": \"1.87.0\",\n");
-    out.push_str(&format!("  \"ndarray_version\": \"{}\",\n", ndarray_version()));
-    out.push_str(&format!("  \"grid\": {{\"width\": {GRID}, \"height\": {GRID}}},\n"));
+    out.push_str(&format!(
+        "  \"ndarray_version\": \"{}\",\n",
+        ndarray_version()
+    ));
+    out.push_str(&format!(
+        "  \"grid\": {{\"width\": {GRID}, \"height\": {GRID}}},\n"
+    ));
     out.push_str(&format!("  \"num_kernels\": {NUM_KERNELS},\n"));
     out.push_str(&format!("  \"seed\": {SEED},\n"));
     out.push_str(&format!("  \"steps\": {STEPS},\n"));

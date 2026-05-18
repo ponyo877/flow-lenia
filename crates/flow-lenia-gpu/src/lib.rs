@@ -8,6 +8,14 @@
 
 use std::future::Future;
 
+pub mod kernel_buffers;
+pub mod readback;
+
+pub use kernel_buffers::{
+    readback_kernels, readback_meta, upload_kernels, GpuKernelBuffers, GpuKernelMeta,
+};
+pub use readback::readback_buffer;
+
 /// Owns the four core `wgpu` handles the rest of the crate (and the
 /// downstream binary) needs.
 ///

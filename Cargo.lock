@@ -507,7 +507,10 @@ dependencies = [
  "flow-lenia-core",
  "glam",
  "log",
+ "ndarray",
  "pollster",
+ "rand",
+ "rand_chacha",
  "wgpu",
 ]
 

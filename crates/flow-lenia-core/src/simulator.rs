@@ -82,7 +82,10 @@ impl FlowLeniaSimulator {
     #[must_use]
     pub fn new(cfg: FlowLeniaConfig, seed: u64) -> Self {
         assert!(cfg.channels > 0, "channels must be > 0");
-        assert!(cfg.grid_height > 0 && cfg.grid_width > 0, "grid dims must be > 0");
+        assert!(
+            cfg.grid_height > 0 && cfg.grid_width > 0,
+            "grid dims must be > 0"
+        );
 
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
         let kernel_params = KernelParams::sample_random(

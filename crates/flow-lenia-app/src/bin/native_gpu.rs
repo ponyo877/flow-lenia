@@ -195,5 +195,7 @@ fn main() {
         render: None,
         fps_counter: FpsCounter::new(),
     };
-    event_loop.run_app(&mut app).expect("event loop terminated with error");
+    event_loop
+        .run_app(&mut app)
+        .expect("event loop terminated with error");
 }
