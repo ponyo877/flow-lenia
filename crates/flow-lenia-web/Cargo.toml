@@ -19,6 +19,18 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 flow-lenia-core.workspace = true
+flow-lenia-gpu.workspace = true
+# Activation buffers and CPU references for the convolve sanity check.
+ndarray.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
+bytemuck.workspace = true
+# `futures-channel` provides the `oneshot` we use to bridge wgpu's
+# `Buffer::map_async` callback into the async/await world. On the web
+# `Device::poll(Wait)` would block the JS main thread and deadlock; the
+# oneshot pattern instead lets the browser event loop tick while the
+# GPU work completes.
+futures-channel = "0.3"
 # WGSL only on the web — WebGPU is the backend, no Metal/Vulkan need
 # enabling. `default-features = false` strips out backend crates we
 # don't ship in WASM.
