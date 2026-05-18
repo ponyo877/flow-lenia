@@ -79,7 +79,7 @@ fn warmup_steps(grid: u32) -> u32 {
 }
 
 fn headless_ctx() -> GpuContext {
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     GpuContext::new_blocking(instance, None)
 }
 
@@ -131,7 +131,7 @@ fn section_full_matrix(ctx: &GpuContext, grids: &[u32], channels_list: &[u32]) -
             for _ in 0..m {
                 gpu_pipeline.step(ctx);
             }
-            ctx.device.poll(wgpu::PollType::Wait).unwrap();
+            ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
             let gpu_us = gpu_started.elapsed().as_secs_f64() * 1e6 / f64::from(m);
 
             let ratio = gpu_us / cpu_us;
@@ -173,7 +173,7 @@ fn measure_pass<F: FnMut(&mut wgpu::CommandEncoder)>(
         .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) });
     record(&mut warm_enc);
     ctx.queue.submit([warm_enc.finish()]);
-    ctx.device.poll(wgpu::PollType::Wait).unwrap();
+    ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
 
     let started = Instant::now();
     for _ in 0..iters {
@@ -183,7 +183,7 @@ fn measure_pass<F: FnMut(&mut wgpu::CommandEncoder)>(
         record(&mut enc);
         ctx.queue.submit([enc.finish()]);
     }
-    ctx.device.poll(wgpu::PollType::Wait).unwrap();
+    ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
     started.elapsed().as_secs_f64() * 1e6 / f64::from(iters)
 }
 
@@ -457,7 +457,7 @@ fn section_mass_conservation_500(ctx: &GpuContext) {
                 let mut max_rel = 0.0_f64;
                 for _ in 0..N_STEPS {
                     pipeline.step(ctx);
-                    ctx.device.poll(wgpu::PollType::Wait).unwrap();
+                    ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
                     let a = pipeline.readback_activation(ctx);
                     let m: f64 = a.iter().map(|&v| f64::from(v)).sum();
                     let rel = (m - m0).abs() / m0;

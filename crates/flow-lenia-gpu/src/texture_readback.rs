@@ -88,7 +88,7 @@ pub fn readback_rgba8_texture(
         let _ = tx.send(r);
     });
     ctx.device
-        .poll(wgpu::PollType::Wait)
+        .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
         .expect("device.poll(Wait) failed");
     rx.recv()
         .expect("readback channel disconnected")

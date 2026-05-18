@@ -23,7 +23,12 @@ flow-lenia-gpu.workspace = true
 # WGSL only on the web — WebGPU is the backend, no Metal/Vulkan need
 # enabling. `default-features = false` strips out backend crates we
 # don't ship in WASM.
-wgpu = { version = "25.0.2", default-features = false, features = ["webgpu", "wgsl"] }
+# Keep `default-features = false` here — workspace.dependencies.wgpu
+# is the full backend bundle for native crates, but the WASM build
+# wants only the `webgpu` + `wgsl` features. cargo doesn't allow
+# overriding default-features through `workspace = true` (see warning
+# in wgpu 29 toolchain), so this crate pins its own wgpu line.
+wgpu = { version = "29", default-features = false, features = ["webgpu", "wgsl"] }
 winit.workspace = true
 wasm-bindgen = "0.2.120"
 wasm-bindgen-futures = "0.4"

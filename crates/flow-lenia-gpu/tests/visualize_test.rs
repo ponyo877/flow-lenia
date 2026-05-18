@@ -22,7 +22,7 @@ use ndarray::Array3;
 const TEXTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 fn headless_ctx() -> GpuContext {
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     GpuContext::new_blocking(instance, None)
 }
 
@@ -72,7 +72,7 @@ fn render_to_rgba(
         });
     pass.record(&mut enc, &bg, &view);
     ctx.queue.submit([enc.finish()]);
-    ctx.device.poll(wgpu::PollType::Wait).unwrap();
+    ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
 
     let bytes = readback_rgba8_texture(ctx, &texture, render_w, render_h);
     (render_w, render_h, bytes)

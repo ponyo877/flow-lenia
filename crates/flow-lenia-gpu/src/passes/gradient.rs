@@ -79,8 +79,8 @@ impl GradientPass {
                     .device
                     .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                         label: Some(label),
-                        bind_group_layouts: &[bgl],
-                        push_constant_ranges: &[],
+                        bind_group_layouts: &[Some(bgl)],
+                        immediate_size: 0,
                     });
                 ctx.device
                     .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -273,7 +273,7 @@ mod tests {
     use std::time::Instant;
 
     fn headless_ctx() -> GpuContext {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         GpuContext::new_blocking(instance, None)
     }
 
@@ -302,7 +302,7 @@ mod tests {
             });
         pass.record_u(&mut enc, &bg, h as u32, w as u32);
         ctx.queue.submit([enc.finish()]);
-        ctx.device.poll(wgpu::PollType::Wait).unwrap();
+        ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
         readback_buffer::<f32>(ctx, &grad_u_buf, c * h * w * 2)
     }
 
@@ -327,7 +327,7 @@ mod tests {
             });
         pass.record_a_sum(&mut enc, &bg, h as u32, w as u32);
         ctx.queue.submit([enc.finish()]);
-        ctx.device.poll(wgpu::PollType::Wait).unwrap();
+        ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
         readback_buffer::<f32>(ctx, &grad_buf, h * w * 2)
     }
 

@@ -325,7 +325,7 @@ impl GpuStepPipeline {
         for _ in 0..n {
             self.step(ctx);
         }
-        ctx.device.poll(wgpu::PollType::Wait).unwrap();
+        ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
     }
 
     /// Number of steps taken since construction.
@@ -399,7 +399,7 @@ mod tests {
     };
 
     fn headless_ctx() -> GpuContext {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         GpuContext::new_blocking(instance, None)
     }
 

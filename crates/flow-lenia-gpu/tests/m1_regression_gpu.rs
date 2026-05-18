@@ -130,7 +130,7 @@ fn read_f32_bin(path: PathBuf, expected_len: usize) -> Vec<f32> {
 
 #[test]
 fn gpu_pipeline_matches_m1_baseline_fixtures_c1() {
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let ctx = GpuContext::new_blocking(instance, None);
 
     let mut per_case_summary: Vec<String> = Vec::new();
@@ -207,7 +207,7 @@ fn gpu_pipeline_matches_m1_baseline_fixtures_c1() {
 /// Full-pipeline 100-step mass conservation. Uses the same 8 cases.
 #[test]
 fn gpu_pipeline_mass_conservation_100_steps() {
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let ctx = GpuContext::new_blocking(instance, None);
 
     let mut report: Vec<String> = Vec::new();
@@ -229,7 +229,7 @@ fn gpu_pipeline_mass_conservation_100_steps() {
             // Per-step readback to track drift over the whole run.
             // Dominates timing (cf. M2.7-mass observation) but is the
             // only way to find the worst-case step.
-            ctx.device.poll(wgpu::PollType::Wait).unwrap();
+            ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
             let a = pipeline.readback_activation(&ctx);
             let m: f64 = a.iter().map(|&v| f64::from(v)).sum();
             let rel = (m - m0).abs() / m0;
@@ -269,7 +269,7 @@ fn gpu_pipeline_mass_conservation_100_steps() {
 /// per-frame loop). 1000 steps with a single readback at the end.
 #[test]
 fn gpu_pipeline_per_step_timing() {
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let ctx = GpuContext::new_blocking(instance, None);
 
     let case = Case {

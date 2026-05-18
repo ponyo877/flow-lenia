@@ -244,7 +244,7 @@ mod tests {
     use std::time::Instant;
 
     fn headless_ctx() -> GpuContext {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         GpuContext::new_blocking(instance, None)
     }
 

@@ -139,7 +139,11 @@ impl ApplicationHandler for App {
         // 2. Manual surface + adapter selection so we can pick an sRGB
         //    swapchain format (gamma correction comes free, no manual
         //    `pow(c, 1/2.2)` in the fragment shader).
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        // wgpu 29: explicit display-handle policy. Native window
+        // needs the display handle to pick the right Vulkan/Metal/DX
+        // surface, so pull it from the env (winit/raw-window-handle).
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let surface = instance
             .create_surface(window.clone())
             .expect("failed to create wgpu surface");
@@ -268,16 +272,30 @@ fn reset_simulation(state: &mut AppState) {
 }
 
 fn render_frame(state: &mut AppState) {
+    // wgpu 29 replaced `Result<SurfaceTexture, SurfaceError>` with an
+    // enum that distinguishes "got a usable texture" (Success /
+    // Suboptimal — both carry one) from a handful of recoverable /
+    // unrecoverable non-frame states. Treat Suboptimal as success
+    // (render but reconfigure for next frame), Lost / Outdated as
+    // "reconfigure and skip", Timeout / Occluded as "skip silently",
+    // Validation as a warn-and-skip.
     let frame = match state.surface.get_current_texture() {
-        Ok(f) => f,
-        Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+        wgpu::CurrentSurfaceTexture::Success(f) => f,
+        wgpu::CurrentSurfaceTexture::Suboptimal(f) => {
+            state
+                .surface
+                .configure(&state.gpu.device, &state.surface_config);
+            f
+        }
+        wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
             state
                 .surface
                 .configure(&state.gpu.device, &state.surface_config);
             return;
         }
-        Err(e) => {
-            log::warn!("get_current_texture error: {e:?}");
+        wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return,
+        wgpu::CurrentSurfaceTexture::Validation => {
+            log::warn!("get_current_texture: validation error");
             return;
         }
     };

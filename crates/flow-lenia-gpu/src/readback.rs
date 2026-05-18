@@ -68,7 +68,7 @@ pub fn readback_buffer<T: Pod>(
     // `Wait` blocks until the most recent submission completes and the
     // map callback above fires.
     ctx.device
-        .poll(wgpu::PollType::Wait)
+        .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
         .expect("device.poll(Wait) failed");
     rx.recv()
         .expect("readback channel disconnected")

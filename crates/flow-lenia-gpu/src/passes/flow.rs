@@ -51,8 +51,8 @@ impl FlowPass {
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("flow pipeline layout"),
-                bind_group_layouts: &[&bind_group_layout],
-                push_constant_ranges: &[],
+                bind_group_layouts: &[Some(&bind_group_layout)],
+                immediate_size: 0,
             });
 
         let pipeline = ctx
@@ -189,7 +189,7 @@ mod tests {
     use std::time::Instant;
 
     fn headless_ctx() -> GpuContext {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         GpuContext::new_blocking(instance, None)
     }
 
@@ -260,7 +260,7 @@ mod tests {
         grad_pass.record_a_sum(&mut enc, &bg_as, h as u32, w as u32);
         flow_pass.record(&mut enc, &bg_flow, h as u32, w as u32);
         ctx.queue.submit([enc.finish()]);
-        ctx.device.poll(wgpu::PollType::Wait).unwrap();
+        ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
 
         readback_buffer::<f32>(ctx, &f_buf, c * h * w * 2)
     }

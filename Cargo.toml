@@ -28,8 +28,13 @@ rand = "0.8"
 rand_chacha = "0.3"
 approx = "0.5"
 
-wgpu = "25"
-winit = "0.30"
+# wgpu / winit upgraded together with egui 0.34 (M4.0.5, 2026-05-18):
+# egui-wgpu 0.34.x is pinned to wgpu 29, so the workspace tracks 29
+# uniformly. winit moved to a specific patch (0.30.13) for the version
+# egui-winit 0.34.x's optional dep targets — keeps a single
+# ApplicationHandler ABI across egui / native / web.
+wgpu = "29"
+winit = "0.30.13"
 pollster = "0.4"
 log = "0.4"
 env_logger = "0.11"

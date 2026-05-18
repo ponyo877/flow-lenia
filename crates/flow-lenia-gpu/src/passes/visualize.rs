@@ -85,8 +85,8 @@ impl VisualizePass {
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("visualize pipeline layout"),
-                bind_group_layouts: &[&bind_group_layout],
-                push_constant_ranges: &[],
+                bind_group_layouts: &[Some(&bind_group_layout)],
+                immediate_size: 0,
             });
 
         let pipeline = ctx
@@ -121,7 +121,10 @@ impl VisualizePass {
                     })],
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
                 }),
-                multiview: None,
+                // wgpu 28 renamed the pipeline-side multiview field;
+                // type stayed `Option<NonZero<u32>>` (the RenderPass-
+                // side field below is a plain u32, easy to mix up).
+                multiview_mask: None,
                 cache: None,
             });
 
@@ -199,6 +202,9 @@ impl VisualizePass {
             label: Some("visualize render pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: target_view,
+                // wgpu 26 added `depth_slice` for 3D / volumetric
+                // attachments — None for 2D targets like ours.
+                depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
@@ -208,6 +214,9 @@ impl VisualizePass {
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
+            // wgpu 28 multiview: None = single-view (matches the
+            // pipeline's multiview_mask above).
+            multiview_mask: None,
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, bind_group, &[]);

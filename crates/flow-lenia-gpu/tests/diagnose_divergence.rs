@@ -61,7 +61,7 @@ fn field_diff(a: &ActivationField, b: &ActivationField) -> (f32, f32) {
 }
 
 fn headless_ctx() -> GpuContext {
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     GpuContext::new_blocking(instance, None)
 }
 

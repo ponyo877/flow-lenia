@@ -1,10 +1,18 @@
-# Flow-Lenia WebGPU Visualizer — 設計書 (Rev. 4.1)
+# Flow-Lenia WebGPU Visualizer — 設計書 (Rev. 4.3)
 
 本書は Rust + WebAssembly + WebGPU で **Flow-Lenia (Plantec et al., 2025, Artificial Life journal, arXiv:2506.08569v1)** を厳密に再現し、ブラウザ上でリアルタイム可視化する実装の設計書である。
 
 **実装の正典**は `papers/2506.08569v1.pdf` (2025年版) であり、Equation 番号は同論文を指す。副参照として `papers/2212.07906v2.pdf` (2023年版)、Moroz, 2020 "Reintegration tracking"、**公式 JAX 実装** `references/FlowLenia-jax/` (commit `dce428c`, 2024-02-08) を用いる。JAX 実装の精読結果は `references/JAX_NOTES.md` を参照。
 
 ## Rev. 履歴
+
+### Rev.4.3 (2026-05、M4 着手前の依存版上げ)
+
+- **§1.2 wgpu pin を `=25.0.x` → `29` に変更**。理由: M4.0 調査で `egui-wgpu 0.34.2` (M4 で採用予定の最新 egui 統合 crate) が wgpu 29 系に固定されていることを確認、Rev.4.2 時点で「eframe 0.34 = wgpu 25 バンドル」を前提とした採用判断 (Rev.4 当初の「eframe を使う」想定) が **M4 で eframe を使わず `egui` + `egui-wgpu` + `egui-winit` を直叩きする方針** によって失効したため
+- **§1.2 表内の `winit` pin を `=0.30.x` → `=0.30.13`** に変更 (`egui-winit 0.34.x` の optional dep)
+- **§1.2 table の備考**: 「MSRV は 1.76」→「MSRV は 1.87 (wgpu 29 が要求)」
+- M4.0.5 として独立コミットで実施。回帰検証: cargo test --workspace --release で 138 tests 全 pass、M1.15 fixture (mass conservation 8 ケース) max_rel ≈ 2e-5 で M2 baseline と整合、bench_step 64×64 / C=3 で GPU/CPU = 0.34 (M2.11 = 0.31、+9.7% 微増、許容範囲内)、native_gpu / Chrome WebGPU 両方で creature 動作確認済み
+- API surface の主な機械的変更点 (DEV メモ): `Instance::new` が値渡しかつ `InstanceDescriptor::new_without_display_handle()` 経由、`PipelineLayoutDescriptor` の `bind_group_layouts` が `&[Option<&BindGroupLayout>]`、`push_constant_ranges` 廃止 → `immediate_size: 0` (wgpu 28 rename)、`RenderPassColorAttachment` に `depth_slice: None` 追加 (wgpu 26)、`RenderPipelineDescriptor::multiview` → `multiview_mask: Option<NonZero<u32>>` (wgpu 28)、`PollType::Wait` が `{ submission_index, timeout }` 形式 (wgpu 27)、`Surface::get_current_texture` が `CurrentSurfaceTexture` enum (wgpu 29)、`DeviceDescriptor` に `experimental_features` field 追加 (wgpu 27)
 
 ### Rev.4.2 (2026-05、M2 完了時の方針変更)
 
@@ -115,24 +123,22 @@
 調査結果 (2026-05 時点):
 
 - `wgpu` 最新安定版: **29.0.3** (2026-03 リリース、MSRV 1.87)
-- `egui` / `eframe` 最新安定版: **0.34.1** (2026-03)、**wgpu 25 にバンドル**
+- `egui` / `egui-wgpu` 最新安定版: **0.34.2** (2026-05)、**wgpu 29 系に直接対応**
 
-eframe は伝統的に wgpu のメジャーバージョンを 2〜4 リリース遅れて追従する。`wgpu 29 + eframe 0.34` の併用は依存解決失敗または実行時不整合を起こす。
-
-**採用**: **(A) wgpu 25 + eframe 0.34**。教育的価値と段階的実装の見通しを優先。MSRV 1.76 で足りる。
+**採用 (Rev.4.3 で更新)**: **wgpu 29 + `egui` 0.34.x (eframe を使わず `egui` + `egui-wgpu` + `egui-winit` を直叩き)**。Rev.4.2 までは「eframe 0.34 が wgpu 25 をバンドルする」前提で wgpu 25 を採用していたが、M4 着手時の調査で `eframe` 抜きの `egui-wgpu` 直叩きが wgpu 29 と整合することが判明、`eframe` 自体のアップグレード待ちを介さず最新 wgpu を採用できるため移行。MSRV は wgpu 29 要求の **1.87** で従来 (Rev.4.1) 採用バージョンと同じ。
 
 最終バージョン pin (Cargo.toml で `=` 固定、実装着手時の最新パッチを使用):
 
 | crate | バージョン | 用途 |
 |---|---|---|
-| `wgpu` | `=25.0.x` | GPU API (MSRV は 1.76 だが本プロジェクトは依存の都合で 1.87 採用) |
-| `winit` | `=0.30.x` (eframe 0.34 要求) | ネイティブウィンドウ |
+| `wgpu` | `29` | GPU API (MSRV 1.87、Rev.4.3 で 25 → 29) |
+| `winit` | `=0.30.13` (`egui-winit 0.34.x` の optional dep) | ネイティブウィンドウ |
 | `wasm-bindgen` | `=0.2.x` | WASM ⇄ JS 境界 |
 | `web-sys` | `=0.3.x` | DOM / Canvas / WebGPU 型 |
 | `console_error_panic_hook` | `=0.1.x` | ブラウザでのパニック表示 |
 | `bytemuck` | `=1.x` | バッファシリアライズ |
 | `glam` | `=0.29.x` | ベクトル/行列 |
-| `egui` / `eframe` | `=0.34.x` (`features = ["wgpu"]`) | UI |
+| `egui` / `egui-wgpu` / `egui-winit` | `=0.34.x` (M4.1 で追加) | UI、eframe 抜きで直叩き |
 | `ndarray` | `=0.16.x` | CPU 参照実装の補助 |
 | `rand` / `rand_chacha` | `=0.8.x` | 再現可能な乱数 (CPU 側) |
 | `approx` | `=0.5.x` | テスト用浮動小数比較 |

@@ -312,7 +312,12 @@ fn resolve_physical_canvas_size(window: &Window) -> (u32, u32) {
 
 async fn build_app_state(window: Arc<Window>) -> AppState {
     // ─── wgpu context bound to the canvas surface ─────────────────
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+    // wgpu 29: `InstanceDescriptor::default()` was removed in favour
+    // of explicit display-handle policy. The browser canvas surface
+    // doesn't need a raw display handle (the browser provides one
+    // implicitly), so use the no-handle variant.
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let surface = instance
         .create_surface(Arc::clone(&window))
         .expect("failed to create wgpu surface");
@@ -409,16 +414,27 @@ fn reset_simulation(state: &mut AppState) {
 }
 
 fn render_frame(state: &mut AppState) {
+    // wgpu 29 replaced `Result<SurfaceTexture, SurfaceError>` with the
+    // `CurrentSurfaceTexture` enum — see the native_gpu binary for the
+    // full rationale comment. Suboptimal carries a usable texture too,
+    // so we render with it and reconfigure for the next frame.
     let frame = match state.surface.get_current_texture() {
-        Ok(f) => f,
-        Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+        wgpu::CurrentSurfaceTexture::Success(f) => f,
+        wgpu::CurrentSurfaceTexture::Suboptimal(f) => {
+            state
+                .surface
+                .configure(&state.gpu.device, &state.surface_config);
+            f
+        }
+        wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
             state
                 .surface
                 .configure(&state.gpu.device, &state.surface_config);
             return;
         }
-        Err(e) => {
-            log::warn!("get_current_texture: {e:?}");
+        wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return,
+        wgpu::CurrentSurfaceTexture::Validation => {
+            log::warn!("get_current_texture: validation error");
             return;
         }
     };

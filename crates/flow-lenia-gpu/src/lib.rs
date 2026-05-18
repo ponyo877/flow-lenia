@@ -101,6 +101,10 @@ impl GpuContext {
                 required_features: wgpu::Features::empty(),
                 required_limits: wgpu::Limits::default(),
                 memory_hints: wgpu::MemoryHints::default(),
+                // wgpu 27+ gates EXPERIMENTAL_* features behind this
+                // disabled-by-default ack token. We don't use any of
+                // them — keep it disabled.
+                experimental_features: wgpu::ExperimentalFeatures::disabled(),
                 trace: wgpu::Trace::Off,
             })
             .await
@@ -146,7 +150,13 @@ impl GpuContext {
         width: u32,
         height: u32,
     ) -> (Self, SurfaceState<'w>) {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        // wgpu 29 removed `InstanceDescriptor::default()` and made
+        // `Instance::new` take its descriptor by value. We use the
+        // no-display-handle constructor uniformly across the workspace
+        // — `create_surface(target)` below pulls the raw display
+        // handle from the target itself on platforms that need one.
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let surface = instance
             .create_surface(target)
             .expect("failed to create wgpu surface");
