@@ -38,6 +38,15 @@ egui-wgpu = "0.34"
 # wayland (clipboard + Linux backends), none of which compile for
 # wasm32. Keep them off, opt back into the wasm-safe subset.
 egui-winit = { version = "0.34", default-features = false, features = ["links", "webbrowser", "bytemuck"] }
+# M4.2 screenshot: encode the readback bytes as PNG. Chrome WebGPU's
+# `canvas.toBlob` returns a black image (the wgpu surface texture is
+# not readable through the 2D canvas pipeline), so we render to an
+# offscreen Rgba8Unorm texture, copy it to a staging buffer, map_async,
+# and feed the bytes to the `png` encoder here. `default-features = false`
+# strips other image formats; pulling only PNG keeps the wasm bundle
+# slim (≈ 200 KB before wasm-opt).
+image = { version = "0.24", default-features = false, features = ["png"] }
+futures-channel = "0.3"
 winit.workspace = true
 wasm-bindgen = "0.2.120"
 wasm-bindgen-futures = "0.4"
@@ -45,6 +54,12 @@ web-sys = { version = "0.3", features = [
     "Document",
     "Window",
     "HtmlCanvasElement",
+    # M4.2: screenshot button — canvas.toBlob → object URL → synthetic
+    # <a download> click → revoke. Each line below maps to one of those
+    # interop hops.
+    "Blob",
+    "Url",
+    "HtmlAnchorElement",
 ] }
 js-sys = "0.3"
 console_error_panic_hook = "0.1"

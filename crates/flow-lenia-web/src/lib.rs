@@ -190,6 +190,11 @@ impl ApplicationHandler<AppEvent> for App {
             }
             render_frame(state);
             state.fps.tick(state.pipeline.step_count(), state.running);
+            // M4.2: progress the device's internal queue so any
+            // outstanding `map_async` callbacks (e.g. the screenshot
+            // readback) can fire. On native this is implicit; on the
+            // browser the wgpu runtime relies on us pumping it.
+            let _ = state.gpu.device.poll(wgpu::PollType::Poll);
         }
     }
 
@@ -380,7 +385,11 @@ async fn build_app_state(window: Arc<Window>) -> AppState {
         .unwrap_or(caps.formats[0]);
     let (physical_w, physical_h) = resolve_physical_canvas_size(&window);
     let surface_config = wgpu::SurfaceConfiguration {
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        // `COPY_SRC` is needed so the M4.2 screenshot button can
+        // capture the surface via `canvas.toBlob` — without it the
+        // browser hands back a black frame (the swap chain texture
+        // can't be sampled).
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
         format,
         width: physical_w,
         height: physical_h,
@@ -488,6 +497,183 @@ fn reset_simulation(state: &mut AppState) {
     log::info!("simulation reset (seed = {SEED})");
 }
 
+/// 256-byte row alignment required by `copy_texture_to_buffer`. We
+/// pad to this on copy and strip the padding back out after readback.
+const COPY_BYTES_PER_ROW_ALIGNMENT: u32 = 256;
+
+fn align_to(x: u32, alignment: u32) -> u32 {
+    x.div_ceil(alignment) * alignment
+}
+
+/// Render-and-download the current creature as a PNG.
+///
+/// Approach (chosen after `canvas.toBlob` on the live WebGPU surface
+/// returned a black frame): build a fresh offscreen `Rgba8Unorm`
+/// texture, render the *same* visualize pass into it at a
+/// screenshot-friendly resolution, copy the texture into a staging
+/// buffer, and `map_async` it. The mapped bytes are PNG-encoded by
+/// the `image` crate and handed to the browser via a synthesised
+/// `<a download>` link.
+///
+/// We **do not** capture the egui side panel — the PNG is pure
+/// Flow-Lenia output, so SNS shares are unobstructed.
+fn trigger_screenshot(state: &AppState, step: u64) {
+    // Target a fixed maximum dimension, then pick the largest integer
+    // upscale that fits. With the default 64×64 grid this gives 16×
+    // upscale → 1024×1024 PNG; future grid sizes (M4.5) stay near the
+    // same file footprint instead of ballooning quadratically.
+    const PNG_MAX_DIM: u32 = 1024;
+    let upscale = (PNG_MAX_DIM / GRID_W).max(1);
+    let png_w = GRID_W * upscale;
+    let png_h = GRID_H * upscale;
+
+    // Offscreen visualize at a known sRGB-correct format. Rgba8Unorm
+    // is what the `image` PNG encoder expects bit-for-bit, so we
+    // skip any sRGB conversion on the readback path.
+    let device = state.gpu.device.clone();
+    let queue = state.gpu.queue.clone();
+    let activation_buf = state.pipeline.a_buffer(state.pipeline.ping_index()).clone();
+    let visualize = VisualizePass::new(&state.gpu, wgpu::TextureFormat::Rgba8Unorm, upscale);
+    let globals_buf = visualize.upload_globals(&state.gpu, GRID_H, GRID_W, demo_cfg().channels);
+    let bind_group = visualize.make_bind_group(&state.gpu, &activation_buf, &globals_buf);
+
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("screenshot offscreen"),
+        size: wgpu::Extent3d {
+            width: png_w,
+            height: png_h,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+    let bytes_per_pixel = 4u32;
+    let padded_bytes_per_row = align_to(png_w * bytes_per_pixel, COPY_BYTES_PER_ROW_ALIGNMENT);
+    let buffer_size = u64::from(padded_bytes_per_row) * u64::from(png_h);
+    let staging = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("screenshot staging"),
+        size: buffer_size,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("screenshot encoder"),
+    });
+    visualize.record(&mut encoder, &bind_group, &view, None);
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &staging,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded_bytes_per_row),
+                rows_per_image: Some(png_h),
+            },
+        },
+        wgpu::Extent3d {
+            width: png_w,
+            height: png_h,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit([encoder.finish()]);
+
+    let filename = format!("flow-lenia-step{step}-seed{SEED}.png");
+    wasm_bindgen_futures::spawn_local(async move {
+        // Move-keep the heavy resources alive through the await; they
+        // drop at the end of this future after the download fires.
+        let _hold_texture = texture;
+        let _hold_view = view;
+        let _hold_visualize = visualize;
+        let _hold_globals = globals_buf;
+        let _hold_bind = bind_group;
+        let _hold_activation = activation_buf;
+
+        let (sender, receiver) = futures_channel::oneshot::channel();
+        staging
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                let _ = sender.send(result);
+            });
+        match receiver.await {
+            Ok(Ok(())) => {}
+            other => {
+                log::warn!("screenshot map_async failed: {other:?}");
+                return;
+            }
+        }
+
+        let bytes: Vec<u8> = {
+            let mapped = staging.slice(..).get_mapped_range();
+            // Strip the 256-byte row alignment padding.
+            let mut tight = Vec::with_capacity((png_w * png_h * bytes_per_pixel) as usize);
+            let row_bytes = (png_w * bytes_per_pixel) as usize;
+            for row in 0..png_h as usize {
+                let start = row * padded_bytes_per_row as usize;
+                tight.extend_from_slice(&mapped[start..start + row_bytes]);
+            }
+            tight
+        };
+        staging.unmap();
+        drop(queue);
+        drop(device);
+
+        let mut png_buf: Vec<u8> = Vec::new();
+        {
+            use image::codecs::png::PngEncoder;
+            use image::{ColorType, ImageEncoder};
+            let encoder = PngEncoder::new(&mut png_buf);
+            if let Err(e) = encoder.write_image(&bytes, png_w, png_h, ColorType::Rgba8) {
+                log::warn!("screenshot PNG encode failed: {e:?}");
+                return;
+            }
+        }
+
+        // Hand the encoded bytes to the browser as an `image/png` Blob.
+        let uint8 = js_sys::Uint8Array::from(&png_buf[..]);
+        let array = js_sys::Array::new();
+        array.push(&uint8.buffer());
+        let bag = web_sys::BlobPropertyBag::new();
+        bag.set_type("image/png");
+        let Ok(blob) =
+            web_sys::Blob::new_with_u8_array_sequence_and_options(&array, &bag)
+        else {
+            log::warn!("screenshot Blob construction failed");
+            return;
+        };
+        let Ok(url) = web_sys::Url::create_object_url_with_blob(&blob) else {
+            log::warn!("screenshot createObjectURL failed");
+            return;
+        };
+        let Some(document) = web_sys::window().and_then(|w| w.document()) else {
+            return;
+        };
+        let Ok(anchor_el) = document.create_element("a") else {
+            return;
+        };
+        let Ok(anchor) = anchor_el.dyn_into::<web_sys::HtmlAnchorElement>() else {
+            return;
+        };
+        anchor.set_href(&url);
+        anchor.set_download(&filename);
+        anchor.click();
+        let _ = web_sys::Url::revoke_object_url(&url);
+        log::info!("screenshot saved: {filename} ({png_w}×{png_h})");
+    });
+}
+
 fn render_frame(state: &mut AppState) {
     // wgpu 29 replaced `Result<SurfaceTexture, SurfaceError>` with the
     // `CurrentSurfaceTexture` enum — see the native_gpu binary for the
@@ -519,6 +705,15 @@ fn render_frame(state: &mut AppState) {
 
     // ─── 1. egui pass: build UI shapes from this frame's input ─────
     let raw_input = state.egui_winit_state.take_egui_input(&state.window);
+    // Snapshot the bits the closure needs to read; the closure then
+    // signals back through these locals so we can mutate `state`
+    // outside the closure (the closure can't borrow `state` because
+    // `state.egui_ctx.run` already holds the egui-side borrow).
+    let running_before = state.running;
+    let step_before = state.pipeline.step_count();
+    let mut pause_clicked = false;
+    let mut reset_clicked = false;
+    let mut screenshot_clicked = false;
     // egui 0.34 deprecated `SidePanel::show(&Context, ...)` in favour
     // of a Ui-centric API (PR #5659 unifies SidePanel / TopBottomPanel
     // under a single `Panel` and pushes everyone toward
@@ -526,22 +721,51 @@ fn render_frame(state: &mut AppState) {
     // at runtime — slated for a follow-up clean-up sub-step inside M4.
     #[allow(deprecated)]
     let full_output = state.egui_ctx.run(raw_input, |ctx| {
-        // Only the SidePanel is shown — egui then leaves the
-        // CentralPanel region untouched, so the visualize pass's
-        // pixels remain visible underneath. (Adding a CentralPanel
-        // here, even with `Frame::NONE`, paints over the creature
-        // because egui still emits a fullscreen background quad.)
+        // Only the SidePanel is shown — egui leaves the CentralPanel
+        // region untouched so the visualize pass's pixels stay visible
+        // underneath. (Adding a CentralPanel here, even with
+        // `Frame::NONE`, paints a fullscreen background quad that
+        // covers the creature.)
         egui::SidePanel::right("controls")
             .resizable(false)
             .exact_width(SIDE_PANEL_W as f32)
             .show(ctx, |ui| {
                 ui.heading("Flow-Lenia");
                 ui.separator();
-                ui.label("M4.1: Hello egui");
+                ui.label(format!("Step: {step_before}"));
+                ui.label(format!("Seed: {SEED}"));
+                ui.separator();
+                let pause_label = if running_before { "Pause" } else { "Resume" };
+                if ui.button(pause_label).clicked() {
+                    pause_clicked = true;
+                }
+                if ui.button("Reset").clicked() {
+                    reset_clicked = true;
+                }
+                if ui.button("Screenshot").clicked() {
+                    screenshot_clicked = true;
+                }
                 ui.add_space(8.0);
-                ui.label("(M4.2 で controls 追加予定)");
+                ui.label("Keys: Space / R / Q");
             });
     });
+    // Apply button effects outside the closure so we have unrestricted
+    // access to `state`. Mirrors the keyboard shortcut branch behaviour.
+    if pause_clicked {
+        state.running = !state.running;
+        log::info!(
+            "{} at step={}",
+            if state.running { "resumed" } else { "paused" },
+            state.pipeline.step_count()
+        );
+    }
+    if reset_clicked {
+        reset_simulation(state);
+    }
+    if screenshot_clicked {
+        let step = state.pipeline.step_count();
+        trigger_screenshot(state, step);
+    }
     state
         .egui_winit_state
         .handle_platform_output(&state.window, full_output.platform_output);
