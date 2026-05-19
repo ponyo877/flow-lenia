@@ -339,10 +339,27 @@ impl ApplicationHandler<AppEvent> for App {
     /// pacing the simulation to the compositor instead of to the raw
     /// `ControlFlow::Poll` cadence (which on Chrome 148 WebGPU runs
     /// uncapped at ~130 fps and produces visible per-frame step
-    /// jitter — see `docs/known-issues.md` #4). With render off this
-    /// hook, we set `ControlFlow::Wait` and let the winit event loop
-    /// sleep until the next browser input event arrives.
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {}
+    /// jitter — see `docs/known-issues.md` #4).
+    ///
+    /// M4.5.1.2 — re-arm `ControlFlow::WaitUntil(now + 16 ms)` on every
+    /// `about_to_wait` so the winit event loop ticks at ~60 Hz instead
+    /// of the ~250–1000 Hz busy-loop that pure `Poll` produces on web.
+    /// `WaitUntil` still wakes immediately on a DOM event (so discrete
+    /// keydown / mouseup / `proxy.send_event` deliveries arrive without
+    /// extra latency); the change just reclaims the CPU that the
+    /// MessageChannel pump was burning between events. Without this
+    /// throttle Ponyo877's M1 mini measured 90 % renderer CPU; with it
+    /// the wake-up rate drops to roughly the display refresh.
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // winit 0.30 on wasm32 stores deadlines as `web_time::Instant`
+        // (so `performance.now()` is the backing clock); using the
+        // already-imported `web_time::Instant` here avoids the
+        // `std::time::Instant` vs. `web_time::Instant` distinct-types
+        // compile error.
+        event_loop.set_control_flow(ControlFlow::WaitUntil(
+            Instant::now() + std::time::Duration::from_millis(16),
+        ));
+    }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.init_started {
@@ -1429,19 +1446,12 @@ pub fn run() {
     let event_loop = EventLoop::<AppEvent>::with_user_event()
         .build()
         .expect("failed to create event loop");
-    // M4.5.1.1 — `ControlFlow::Poll`, not `Wait`. The initial M4.5.1
-    // submission used `Wait` on the theory that, with rendering moved
-    // off `about_to_wait`, the loop only needed to wake on real events.
-    // Foreground testing (Ponyo877's 64×64 / 60 Hz session) showed that
-    // winit 0.30.13's web backend under `Wait` drops *discrete* events:
-    // a single keydown, a single mouse click, or a single
-    // `EventLoopProxy::send_event` will fire only the first time after
-    // an idle period and then go silent. Continuous mouse-motion events
-    // (slider drags, dropdown hover) keep arriving fast enough that
-    // some get through, masking the bug. `Poll` re-arms the event-loop
-    // pump every iteration; since our `about_to_wait` body is empty,
-    // the cost is just the FFI round-trip (≈ 0.1–0.5 % CPU vs. the
-    // M4.1 21.7 % busy-render).
+    // M4.5.1.2 — initial control flow is `Poll` so the first
+    // iteration of the loop runs immediately; `about_to_wait` then
+    // re-arms `ControlFlow::WaitUntil(now + 16 ms)` on every wake,
+    // which is the steady-state throttle. See the comment on
+    // `about_to_wait` for the full rationale (M4.5.1's pure `Wait`
+    // dropped discrete events; pure `Poll` burned 90 % CPU on M1).
     event_loop.set_control_flow(ControlFlow::Poll);
     let proxy = event_loop.create_proxy();
     let mut app = App::new(proxy);
