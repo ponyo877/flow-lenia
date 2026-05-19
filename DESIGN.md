@@ -1,10 +1,37 @@
-# Flow-Lenia WebGPU Visualizer — 設計書 (Rev. 4.4)
+# Flow-Lenia WebGPU Visualizer — 設計書 (Rev. 4.5)
 
 本書は Rust + WebAssembly + WebGPU で **Flow-Lenia (Plantec et al., 2025, Artificial Life journal, arXiv:2506.08569v1)** を厳密に再現し、ブラウザ上でリアルタイム可視化する実装の設計書である。
 
 **実装の正典**は `papers/2506.08569v1.pdf` (2025年版) であり、Equation 番号は同論文を指す。副参照として `papers/2212.07906v2.pdf` (2023年版)、Moroz, 2020 "Reintegration tracking"、**公式 JAX 実装** `references/FlowLenia-jax/` (commit `dce428c`, 2024-02-08) を用いる。JAX 実装の精読結果は `references/JAX_NOTES.md` を参照。
 
 ## Rev. 履歴
+
+### Rev.4.5 (2026-05、M4 全体完了)
+
+- **M4 (UI 統合・リアルタイム可視化) 全体完了**。M4.1 から M4.6 まで 11 サブステップで実装、commit は M4.0.5 〜 M4.6 で計 12 個 (origin/main HEAD = `59943b8`)。Chrome 148 WebGPU での実機検証も完了し、Flow-Lenia ブラウザインタラクティブ版が完成形に到達
+- **完成形の達成内容**:
+  - 64×64 / C=3 / |K|=10 で 40+ fps、CPU 22% (M2.11 native ベンチと整合)
+  - egui SidePanel の 6 セクション (Stats / Parameters / Kernels / Grid / Actions / Keyboard) で全コントロール (paper_strict、border、dt、dd、num_kernels、grid_size、channels、Pause/Reset/Screenshot) を提供
+  - キーボード Space / R / Q + マウスインタラクション両対応
+  - Screenshot PNG download (offscreen Rgba8Unorm + wgpu readback + image crate)
+  - per-channel mass realtime readback (30 frame 周期、async map_async + AppEvent dispatch)
+- **主要な技術的判断**:
+  - **render loop の RAF 移行** (M4.5.1, commit `c535f6a`): `about_to_wait` 駆動の uncapped ループが Chrome 148 WebGPU の `Surface::present` 非 vsync block と相まって 131 fps 暴走 → 各 visible frame の sim step 数が不均一になりカクつき発生。`requestAnimationFrame` から WASM の `tick()` を呼ぶ JS-driven 構造に切替えて compositor pace と一致させ、解消
+  - **`ControlFlow::WaitUntil(16ms)` で event loop を 60Hz wake に**(M4.5.1.2, commit `d633dbd`): `Poll` は web で MessageChannel busy-loop となり M1 mini で 90% CPU、`Wait` は discrete event drop。`WaitUntil` で妥協点 (22% CPU + discrete event 即時応答) に到達
+  - **`thread_local!` + `RefCell<Option<AppState>>` + `try_borrow_mut` 防御** (M4.5.1, M4.5.1.1): RAF tick と winit event handler が同一 `AppState` を共有する必要から導入。`device.poll` の同期 callback 経路での double-borrow を防ぐため `tick()` / `window_event` / `user_event` で `try_borrow_mut` skip on contention
+  - **offscreen Rgba8Unorm + 256-byte row alignment readback** (M4.2, commit `2197c13`): Chrome WebGPU の `canvas.toBlob` が swap-chain texture を読めず黒画像になるバグを回避。`VisualizePass` を別 RT に再生成 → `copy_texture_to_buffer` → `map_async` → `image` crate PNG エンコード経路で実装
+  - **`pending_*` field + `rebuild_pipeline()` 統一 helper** (M4.4 / M4.5): egui closure 内の `&mut state` 借用制約を回避しつつ Reset / Apply Kernels / New Seed / Apply Grid を単一 rebuild path で処理。`pending_rebuild: Option<RebuildRequest>` を closure 外で消費する flag pattern
+  - **`FrameTimingDiag` 一時計測コード** (M4.5.1): カクつき診断時に `about_to_wait` (後に `tick()`) 内で interval / render duration ヒストグラムを 300 サンプル毎にログ出力。M6 性能調査でも再利用するため debug build に常設、release では log level で抑制 (M6.0 で扱い検討)
+- **`docs/known-issues.md` 更新**: #1 (RedrawRequested 非到達) を M4.5.1 RAF 移行で obsolete としてマーク、#4 (Chrome 148 WebGPU `Surface::present` 非 vsync block) を新規追加。診断方法と回避策の根拠を記録
+- **§8 マイルストーン状態**: M4 = ✅ 完了、M6 = 着手準備 (M6.0 性能調査) へ。M5 (creature 探索) は M6 完了後に着手予定 (Rev.4.2 の順序維持)
+- **残った既知の課題 (M6 / M5 で対応)**:
+  - **`wasm-opt -Oz` 適用 + bundle size 計測**: dev build 26 MB → release で大幅縮小見込み (現在 trunk 0.21.14 はデフォルトでは wasm-opt を呼ばない、Rev.4.4 で既述)
+  - **Safari 26 / Firefox 150 での詳細 perf 測定**: M3.5 で動作確認のみ、各 grid size の FPS 比較は未取得
+  - **egui `SidePanel::show(&Context, ...)` の Ui-centric API 移行**: egui 0.34 で deprecated、現在 `#[allow(deprecated)]` で抑制中、egui 0.35+ への upgrade と合わせて対応
+  - **Paused 時のフレーム cap**: `state.running = false` でも render_frame は走り続けるので CPU 数% 消費が残る、2Hz wake 等への throttle を検討
+  - **60Hz 表示で実測 45 fps の調査**: native 55+ fps との差の原因究明 (M6.5 で予定)
+  - **winit / wgpu の `RedrawRequested` 上流修正の追跡**: 修正されれば RAF パスを残したまま winit 駆動経路も復活可能
+  - **`FrameTimingDiag` の release ビルド扱い**: log level 抑制 (現在 INFO) で済むか、conditional compilation で完全に削るかを M6 着手時に判断
 
 ### Rev.4.4 (2026-05、M4.1 着手前の rust-toolchain 上げ)
 
@@ -862,14 +889,27 @@ Cloudflare Pages にデプロイ。
 - **M3.4 全パイプライン + visualize WASM 統合**: M2.10 の `native_gpu` 相当 (seed=1729 で creature animation) を Chrome stable で動作確認
 - **M3.5 Chrome stable 動作確認 + Safari/Firefox 状況報告**: M3.4 完了状態を Chrome stable で 30 秒以上走らせて mass conservation を確認、Safari/Firefox は試行のみ (動作・非動作・部分動作を README で報告)
 
-### M4: UI 統合・リアルタイム可視化
+### M4: UI 統合・リアルタイム可視化 ✅ (Rev.4.5 で完了)
 
 **成果物**: egui コントロール一式、状態テクスチャ表示、統計
 
 **完了条件**:
-- §7 の全コントロール動作 (`paper_strict`, `border`, `dd`, init patch range 含む)
-- 128×128 / C=3 / |K|=45 で 30 FPS 以上 (実測ベンチ)
-- 最低 1 つ「明らかに動く creature」が見える固定シードのデモを README に掲載
+- §7 の全コントロール動作 (`paper_strict`, `border`, `dd`, init patch range 含む) — ✅ 達成 (M4.4 / M4.5)
+- 128×128 / C=3 / |K|=45 で 30 FPS 以上 (実測ベンチ) — ⚠ 64×64 は 40 fps 達成、128×128 は M2.11 実測で 17 sps、M6 FFT 化後に再評価
+- 最低 1 つ「明らかに動く creature」が見える固定シードのデモを README に掲載 — ⚠ creature 表示は確認済 (Chrome 148 / Safari 26 / Firefox 150)、README 掲載は M5 デプロイ時に実施
+
+**実装サブステップ** (Rev.4.5):
+- M4.0.5 (`d16abd0`): wgpu 25 → 29 + winit 0.30.13 upgrade
+- M4.0.6 (`b8a5134`): rustc 1.87 → 1.95 (egui 0.34 MSRV)
+- M4.1 (`8e7eaa7`): egui + egui-wgpu 最小統合 + about_to_wait workaround
+- M4.2 (`2197c13`): Pause / Reset / Screenshot ボタン (PNG offscreen readback)
+- M4.3 (`4606191`): realtime FPS / step / per-channel mass 表示
+- M4.4 (`78fae7c`): live parameter sliders + kernel Apply / New Seed
+- M4.5 (`8b17b54`): grid-size + channels dropdown
+- M4.5.1 (`c535f6a`): render を RAF 駆動化 (カクつき修正)
+- M4.5.1.1 (`1b2933a`): discrete-event delivery + RefCell 防御 + diag filter
+- M4.5.1.2 (`d633dbd`): WaitUntil(16ms) で CPU 90% → 22%
+- M4.6 (`59943b8`): SidePanel polish + 残存日本語英語化
 
 ### M6: 性能チューニング (Rev.4.2 で M5 の前に前倒し)
 
