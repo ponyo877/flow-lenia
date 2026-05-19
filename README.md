@@ -77,7 +77,60 @@ Keyboard (same as the native binary):
 | `q` / `Q` | `event_loop.exit()`. Canvas freezes at the last frame; the tab stays    |
 |           | open (WASM cannot close a browser tab without a user gesture).           |
 
-Toolchain: Rust **1.87.0** stable (pinned via `rust-toolchain.toml`).
+Toolchain: Rust **1.95.0** stable (pinned via `rust-toolchain.toml`).
+
+## Regression test running guide
+
+The flow-lenia regression suite splits into two tiers so day-to-day
+`cargo test` stays fast (~45 s) while the heavy long-horizon and
+large-grid checks live behind `--include-ignored`.
+
+### Day-to-day (lightweight, ~45 s)
+
+```sh
+cargo test --release -p flow-lenia-core
+```
+
+Runs the 32×32 and 64×64 bit-equal regressions (`m1_regression_g32`,
+`_g64`) plus all other non-`#[ignore]` tests. The 128×128 and 256×256
+bit-equal regressions, all five `mass_conservation_*` tests, and the
+two one-off measurement tests are skipped.
+
+### Full pre-push verification (heavy, ~1.5 h)
+
+```sh
+cargo test --release -p flow-lenia-core -- --include-ignored
+```
+
+Runs the full set:
+
+- `m1_regression_g{32,64,128,256}` — bit-equal CPU regression across
+  all M6.A.1 fixtures (~13 min).
+- `mass_conservation_g{32,64,128,256,512}` — mass-conservation matrix
+  with tiered step counts (~46 min total, see
+  `crates/flow-lenia-core/tests/mass_conservation_1k.rs` for the
+  per-grid step / case selection).
+- `drift_vs_grid_size_100step` — one-off measurement for
+  `BENCH.md` Section 5 (~42 min).
+- `baseline_64x64_1000step` — one-off measurement for `BENCH.md`
+  Section 6 (~7.7 min).
+
+Run the heavy set before pushing any commit that could touch the
+simulator's numerical path (kernel sampling, convolve, growth,
+reintegrate, gradient). The two one-off measurement tests can be
+omitted when their previously-captured BENCH.md values are still
+known to apply.
+
+### Partial execution
+
+Every regression test name embeds its grid, so a single-grid run is
+one flag away:
+
+```sh
+cargo test --release -p flow-lenia-core m1_regression_g64
+cargo test --release -p flow-lenia-core mass_conservation_g256 \
+    -- --include-ignored
+```
 
 ## Milestone status
 
@@ -146,21 +199,26 @@ python3 -m venv .venv-fixtures
 ## M1 regression fixtures
 
 `crates/flow-lenia-core/tests/m1_regression.rs` asserts bit-equality
-between the simulator output and the 8 baseline fixtures committed under
-`tests/regression_fixtures/m1_baseline/` (one per `paper_strict × border × C`
-combination, 100 steps from `seed=42`). Re-generate only when the dynamics
-or supporting infra intentionally changes:
+between the simulator output and the 32 baseline fixtures committed
+under `tests/regression_fixtures/m1_baseline/` — 4 grid sizes (32, 64,
+128, 256) × 8 `paper_strict × border × C` cases each, 100 steps from
+`seed=42`. (M6.A.1 expanded the fixture set; 512×512 is intentionally
+skipped from bit-equal regression to keep the fixture footprint at
+5.4 MB on disk and the regeneration time at ~17 min; the
+mass-conservation suite covers 512.) Re-generate only when the
+dynamics or supporting infra intentionally changes:
 
 ```sh
 cargo run --release --bin generate_m1_fixtures
 ```
 
-Bit-equality requires the **same Rust toolchain (1.87.0, pinned via
+Bit-equality requires the **same Rust toolchain (1.95.0, pinned via
 `rust-toolchain.toml`)** and the **same resolved `ndarray` version**
-(see `manifest.json`); regenerate after either upgrade. The 1000-step
-mass-conservation matrix lives in `tests/mass_conservation_1k.rs` and
-runs under `cargo test --release -p flow-lenia-core --test
-mass_conservation_1k -- --ignored`.
+(see `manifest.json`); regenerate after either upgrade. The full
+mass-conservation matrix (5 grids, tiered step counts) lives in
+`tests/mass_conservation_1k.rs` and runs under the heavy
+`--include-ignored` flow described in
+*Regression test running guide* above.
 
 ## License
 

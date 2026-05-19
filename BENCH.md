@@ -131,6 +131,91 @@ invariant to test at long horizons** — see [JAX_NOTES.md §14]
 (references/JAX_NOTES.md) for why field-comparison at 500 steps
 would be meaningless under chaotic dynamics.
 
+## Section 5 — drift vs grid size at 100 steps (M6.A.3)
+
+Each cell is the worst-case `max_rel = |m(t) - m(0)| / m(0)` across
+100 simulator steps from `seed=42`. 4 cases per grid
+(`paper_strict=false`, Torus/Wall × C=1/3) keep the table readable.
+Generator: `mass_conservation_1k::drift_vs_grid_size_100step`.
+
+| grid | Torus C=1 | Torus C=3 | Wall C=1 | Wall C=3 |
+|-----:|----------:|----------:|---------:|---------:|
+|   32 |  4.121e-6 |  4.296e-6 | 4.189e-6 | 2.811e-6 |
+|   64 |  4.327e-6 |  3.953e-6 | 4.327e-6 | 3.953e-6 |
+|  128 |  4.258e-6 |  3.885e-6 | 4.258e-6 | 3.885e-6 |
+|  256 |  4.258e-6 |  3.976e-6 | 4.258e-6 | 3.976e-6 |
+|  512 |  4.327e-6 |  3.930e-6 | 4.327e-6 | 3.930e-6 |
+
+**Key observation: drift is essentially grid-independent.** Every
+row hovers at `≈ 4e-6`. The simulator's f32 accumulation error per
+step is set by the per-cell arithmetic (a fixed-size growth-and-
+reintegrate sequence per cell), so summing over more cells just
+adds more iid-ish drift contributions that cancel out under the
+relative-error normalisation. This rules out the "drift grows with
+grid²" concern in DESIGN.md §1.4 and validates the M6.A.3 choice of
+tiered step counts: a 50-step run at 512×512 carries the same
+detection power as a 50-step run at 32×32.
+
+## Section 6 — drift growth with step count (M6.A.3)
+
+64×64 baseline at 1000 steps. Generator:
+`mass_conservation_1k::baseline_64x64_1000step`. Compare against
+Section 5 row "grid = 64" (same configuration, 100 steps).
+
+| paper_strict | border | C | max_rel (1000 step) |
+|--------------|--------|--:|--------------------:|
+| false        | Torus  | 1 | 4.327e-5 |
+| false        | Torus  | 3 | 3.940e-5 |
+| false        | Wall   | 1 | 4.327e-5 |
+| false        | Wall   | 3 | 3.930e-5 |
+| true         | Torus  | 1 | 4.327e-5 |
+| true         | Torus  | 3 | 4.150e-5 |
+| true         | Wall   | 1 | 4.327e-5 |
+| true         | Wall   | 3 | 4.157e-5 |
+
+**Drift scales linearly with step count, not as the √N a pure
+random-walk model would predict.** 1000 steps gives ~10× the drift
+of 100 steps (4.3e-5 vs 4.3e-6), not the ~3.16× √10 prediction.
+The per-step floor is `≈ 4.3 × 10⁻⁸` and stays constant across
+grid sizes and step counts:
+
+- 100 step: 4.3e-6 / 100 = 4.3e-8 per step
+- 200 step: 8.6e-6 / 200 = 4.3e-8 per step (g128 / g256 cases)
+- 500 step: 2.2e-5 / 500 = 4.4e-8 per step (g64 cases)
+- 1000 step: 4.3e-5 / 1000 = 4.3e-8 per step
+- 50 step: 2.1e-6 / 50 = 4.2e-8 per step (g512 cases)
+
+The linear-not-√N scaling means the error per step is *biased*
+(same sign every step) rather than zero-mean random. The bias is
+small enough that even 1000 steps stays 23× under the Torus 1e-3
+budget; M6 changes to the convolve / reintegrate path should
+preserve this floor unless they intentionally trade precision for
+throughput (e.g. f16 accumulation in a future FFT shader). The
+regression-detection mechanism here is: if drift per step jumps
+above ~10⁻⁷, the corresponding `mass_conservation_g*` test will
+fail well before the simulator visibly misbehaves.
+
+## Section 7 — full mass-conservation matrix at tiered step counts (M6.A.3)
+
+Each grid runs the `paper_strict × border × C` matrix at the step
+count chosen by `mass_conservation_1k::mass_conservation_g{N}`.
+512 is restricted to `paper_strict=false` to cap the heavy-run
+budget; 32 keeps the M1.15 1000-step baseline.
+
+| grid | steps | cases | max max_rel | within Torus 1e-3 | within Wall 1e-2 |
+|-----:|------:|------:|------------:|:-----------------:|:----------------:|
+|   32 |  1000 |     8 |    4.210e-5 |  ✓ (23× margin)   |  ✓ (237× margin) |
+|   64 |   500 |     8 |    2.170e-5 |  ✓ (46×)          |  ✓ (460×)        |
+|  128 |   200 |     8 |    8.653e-6 |  ✓ (115×)         |  ✓ (1.15k×)      |
+|  256 |   200 |     8 |    8.653e-6 |  ✓ (115×)         |  ✓ (1.15k×)      |
+|  512 |    50 |     4 |    2.129e-6 |  ✓ (470×)         |  ✓ (4.7k×)       |
+
+Total runtime for all five `mass_conservation_g*` tests (CPU
+release, M1 mini, `--test-threads=1`): ~46 min. Adding the two
+one-off tests (`drift_vs_grid_size_100step`,
+`baseline_64x64_1000step`) brings the full `--include-ignored`
+sweep to ~86 min.
+
 ## Re-running
 
 ```sh
