@@ -243,7 +243,18 @@ impl FrameTimingDiag {
     fn tick(&mut self, now: Instant) {
         if let Some(prev) = self.last_frame_start {
             let elapsed_ms = now.duration_since(prev).as_secs_f64() * 1000.0;
-            self.intervals_ms.push(elapsed_ms);
+            // M4.5.1.1 — drop intervals that are obviously
+            // `document.visibilityState === "hidden"` pauses. RAF is
+            // suspended while the tab is hidden, and the elapsed gap
+            // when it resumes can easily run into tens of seconds,
+            // which would dominate `mean` / `p99` and hide actual
+            // stutter. Real frame stutters max out in the few-hundred-
+            // ms range, so 500 ms is well above any real signal but
+            // far below any plausible hide window.
+            const HIDE_GAP_THRESHOLD_MS: f64 = 500.0;
+            if elapsed_ms <= HIDE_GAP_THRESHOLD_MS {
+                self.intervals_ms.push(elapsed_ms);
+            }
         }
         self.last_frame_start = Some(now);
     }
@@ -387,7 +398,16 @@ impl ApplicationHandler<AppEvent> for App {
             }
             AppEvent::MassReadbackDone(mass) => {
                 APP_STATE.with(|cell| {
-                    if let Some(state) = cell.borrow_mut().as_mut() {
+                    // M4.5.1.1 — `try_borrow_mut` over `borrow_mut`. If
+                    // a RAF tick is mid-flight, dropping this readback
+                    // is acceptable (next 30-frame cycle will trigger
+                    // another one); a panic here would tear down the
+                    // whole event loop.
+                    let Ok(mut binding) = cell.try_borrow_mut() else {
+                        log::warn!("user_event(MassReadbackDone): APP_STATE busy, dropping result");
+                        return;
+                    };
+                    if let Some(state) = binding.as_mut() {
                         state.cached_mass = mass;
                         state.mass_readback_in_flight = false;
                     }
@@ -403,7 +423,13 @@ impl ApplicationHandler<AppEvent> for App {
         event: WindowEvent,
     ) {
         APP_STATE.with(|cell| {
-            let mut binding = cell.borrow_mut();
+            // M4.5.1.1 — see the same comment on tick() / user_event.
+            // Losing a single keystroke is unfortunate but the user can
+            // press the key again; a panic would be permanent.
+            let Ok(mut binding) = cell.try_borrow_mut() else {
+                log::warn!("window_event: APP_STATE busy, dropping event");
+                return;
+            };
             let Some(state) = binding.as_mut() else {
                 return;
             };
@@ -473,10 +499,25 @@ impl ApplicationHandler<AppEvent> for App {
 /// kicked off as soon as `run()` returns control to JS, so the first
 /// dozen or so animation frames are no-ops while WASM finishes async
 /// GPU init.
+///
+/// M4.5.1.1 — uses `try_borrow_mut` rather than `borrow_mut`. WASM is
+/// single-threaded so a conflicting borrow shouldn't happen in normal
+/// flow, but this is the one entry point that *can* fire mid-event-
+/// dispatch (a `device.poll` inside the previous frame can synchronously
+/// fire a `map_async` callback that calls a `proxy.send_event` whose
+/// `user_event` handler is then drained on the very next microtask).
+/// Skipping a single frame is cheap (next RAF is 16 ms away) and far
+/// better than the alternative of a `RefCell` double-borrow panic.
 #[wasm_bindgen]
 pub fn tick() {
     APP_STATE.with(|cell| {
-        let mut binding = cell.borrow_mut();
+        let Ok(mut binding) = cell.try_borrow_mut() else {
+            // Another path is already inside APP_STATE — skip this frame
+            // and let RAF re-fire. This is rare enough that logging on
+            // every miss would be noise; the `frame_diag/interval` max
+            // will surface it if it ever becomes frequent.
+            return;
+        };
         let Some(state) = binding.as_mut() else {
             return;
         };
@@ -1388,11 +1429,20 @@ pub fn run() {
     let event_loop = EventLoop::<AppEvent>::with_user_event()
         .build()
         .expect("failed to create event loop");
-    // `Wait` instead of `Poll` — with RAF driving render, the winit
-    // event loop only needs to wake on browser input events. `Poll`
-    // would be a busy-wake that wastes the very CPU we're trying to
-    // recover with this milestone.
-    event_loop.set_control_flow(ControlFlow::Wait);
+    // M4.5.1.1 — `ControlFlow::Poll`, not `Wait`. The initial M4.5.1
+    // submission used `Wait` on the theory that, with rendering moved
+    // off `about_to_wait`, the loop only needed to wake on real events.
+    // Foreground testing (Ponyo877's 64×64 / 60 Hz session) showed that
+    // winit 0.30.13's web backend under `Wait` drops *discrete* events:
+    // a single keydown, a single mouse click, or a single
+    // `EventLoopProxy::send_event` will fire only the first time after
+    // an idle period and then go silent. Continuous mouse-motion events
+    // (slider drags, dropdown hover) keep arriving fast enough that
+    // some get through, masking the bug. `Poll` re-arms the event-loop
+    // pump every iteration; since our `about_to_wait` body is empty,
+    // the cost is just the FFI round-trip (≈ 0.1–0.5 % CPU vs. the
+    // M4.1 21.7 % busy-render).
+    event_loop.set_control_flow(ControlFlow::Poll);
     let proxy = event_loop.create_proxy();
     let mut app = App::new(proxy);
     event_loop
