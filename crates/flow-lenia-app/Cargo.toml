@@ -6,6 +6,11 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+# `cargo run --release` (without `--bin`) from the workspace root and
+# `cargo run --release --bin native_gpu` both work once this is set.
+# Otherwise cargo complains about either no default target or no
+# default-run binary in the package when invoked workspace-wide.
+default-run = "native_gpu"
 
 [lints]
 workspace = true
