@@ -1,12 +1,12 @@
 #![deny(warnings)]
 //! Generate M1 baseline regression fixtures.
 //!
-//! Writes 8 fixture files + a `manifest.json` to
+//! Writes one fixture file per (grid, paper_strict, border, channels)
+//! combination plus a `manifest.json` to
 //! `tests/regression_fixtures/m1_baseline/` (relative to the repo
 //! root). Each fixture is the activation field after `SEED`-seeded
-//! simulation of `STEPS` steps under one of the 8 mode combinations
-//! (`paper_strict × border × C`), serialised as raw little-endian
-//! `f32` in `(H, W, C)` row-major order.
+//! simulation of `STEPS` steps, serialised as raw little-endian `f32`
+//! in `(H, W, C)` row-major order.
 //!
 //! Run with:
 //!
@@ -19,6 +19,14 @@
 //! regenerate (and commit) the fixtures *only* when the dynamics or
 //! supporting infra (Rust toolchain, `ndarray`) intentionally changes
 //! — see README.md "Regression fixtures" section.
+//!
+//! M6.A.1 — extended from 32×32-only (8 cases) to {32, 64, 128, 256}×
+//! {1, 3 channels} (32 cases). The filename now embeds the grid as
+//! `case_g{N}_ps{T,F}_bt{T,W}_c{1,3}.bin`. 512×512 is intentionally
+//! excluded: bit-equal regression at 512 would cost 24 MB of fixture
+//! storage and ~10 minutes of CPU regeneration time for marginal
+//! coverage value above what the GPU-mass-conservation layer provides
+//! (see DESIGN.md M6.A scope notes).
 
 use flow_lenia_core::{
     config::{BorderMode, MixRule},
@@ -27,14 +35,16 @@ use flow_lenia_core::{
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Instant;
 
 const SEED: u64 = 42;
 const STEPS: u32 = 100;
-const GRID: u32 = 32;
+const GRIDS: &[u32] = &[32, 64, 128, 256];
 const NUM_KERNELS: u32 = 10;
 
 struct Case {
+    grid: u32,
     paper_strict: bool,
     border: BorderMode,
     channels: u32,
@@ -47,13 +57,13 @@ impl Case {
             BorderMode::Torus => 'T',
             BorderMode::Wall => 'W',
         };
-        format!("case_ps{}_bt{}_c{}.bin", ps, bt, self.channels)
+        format!("case_g{}_ps{}_bt{}_c{}.bin", self.grid, ps, bt, self.channels)
     }
 
     fn cfg(&self) -> FlowLeniaConfig {
         FlowLeniaConfig {
-            grid_width: GRID,
-            grid_height: GRID,
+            grid_width: self.grid,
+            grid_height: self.grid,
             channels: self.channels,
             dt: 0.2,
             sigma: 0.65,
@@ -69,15 +79,18 @@ impl Case {
 }
 
 fn all_cases() -> Vec<Case> {
-    let mut out = Vec::with_capacity(8);
-    for &paper_strict in &[false, true] {
-        for &border in &[BorderMode::Torus, BorderMode::Wall] {
-            for &channels in &[1_u32, 3_u32] {
-                out.push(Case {
-                    paper_strict,
-                    border,
-                    channels,
-                });
+    let mut out = Vec::with_capacity(GRIDS.len() * 8);
+    for &grid in GRIDS {
+        for &paper_strict in &[false, true] {
+            for &border in &[BorderMode::Torus, BorderMode::Wall] {
+                for &channels in &[1_u32, 3_u32] {
+                    out.push(Case {
+                        grid,
+                        paper_strict,
+                        border,
+                        channels,
+                    });
+                }
             }
         }
     }
@@ -110,13 +123,21 @@ fn write_manifest(dir: &Path, cases: &[Case], total_elapsed_ms: u128) {
     let mut out = String::new();
     out.push_str("{\n");
     out.push_str(&format!("  \"generated_at\": \"{today}\",\n"));
-    out.push_str("  \"rust_toolchain\": \"1.87.0\",\n");
+    out.push_str("  \"rust_toolchain\": \"1.95.0\",\n");
     out.push_str(&format!(
         "  \"ndarray_version\": \"{}\",\n",
-        ndarray_version()
+        cargo_lock_version("ndarray")
     ));
     out.push_str(&format!(
-        "  \"grid\": {{\"width\": {GRID}, \"height\": {GRID}}},\n"
+        "  \"wgpu_version\": \"{}\",\n",
+        cargo_lock_version("wgpu")
+    ));
+    out.push_str(
+        "  \"fixture_purpose\": \"M6 baseline regression - pre-tuning snapshot\",\n",
+    );
+    out.push_str(&format!(
+        "  \"commit_sha\": \"{}\",\n",
+        git_head_sha()
     ));
     out.push_str(&format!("  \"num_kernels\": {NUM_KERNELS},\n"));
     out.push_str(&format!("  \"seed\": {SEED},\n"));
@@ -130,12 +151,15 @@ fn write_manifest(dir: &Path, cases: &[Case], total_elapsed_ms: u128) {
         };
         out.push_str("    {\n");
         out.push_str(&format!("      \"filename\": \"{}\",\n", c.filename()));
+        out.push_str(&format!("      \"grid\": {},\n", c.grid));
         out.push_str(&format!("      \"paper_strict\": {},\n", c.paper_strict));
         out.push_str(&format!("      \"border\": \"{border_name}\",\n"));
         out.push_str(&format!("      \"channels\": {},\n", c.channels));
+        out.push_str(&format!("      \"seed\": {SEED},\n"));
+        out.push_str(&format!("      \"steps\": {STEPS},\n"));
         out.push_str(&format!(
-            "      \"shape\": [{GRID}, {GRID}, {}],\n",
-            c.channels
+            "      \"shape\": [{0}, {0}, {1}],\n",
+            c.grid, c.channels
         ));
         out.push_str("      \"dtype\": \"f32_le\"\n");
         out.push_str("    }");
@@ -150,6 +174,23 @@ fn write_manifest(dir: &Path, cases: &[Case], total_elapsed_ms: u128) {
     let path = dir.join("manifest.json");
     fs::write(&path, out).unwrap_or_else(|e| panic!("failed to write manifest: {e}"));
     println!("  wrote {}", path.display());
+}
+
+/// Best-effort `git rev-parse HEAD` for manifest provenance. Run from
+/// the package's manifest dir; if `git` is unavailable or the repo
+/// state is unusable, we fall back to `"unknown"` — the manifest is
+/// informational, not load-bearing.
+fn git_head_sha() -> String {
+    let out = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output();
+    if let Ok(out) = out {
+        if out.status.success() {
+            return String::from_utf8_lossy(&out.stdout).trim().to_string();
+        }
+    }
+    "unknown".to_string()
 }
 
 /// Best-effort YYYY-MM-DD using only `std::time`. Avoids pulling in
@@ -177,12 +218,12 @@ fn ymd_today() -> String {
     format!("{:04}-{:02}-{:02}", y, m, d)
 }
 
-/// Read the `ndarray` dependency version from the (committed)
-/// `Cargo.lock` so the manifest captures the *resolved* version, not
-/// the requirement-range string from `Cargo.toml`. Falls back to
-/// `"unknown"` if anything is off — the manifest is descriptive
+/// Read the *resolved* version of a workspace dependency from the
+/// committed `Cargo.lock`. Used to capture per-crate version provenance
+/// in the manifest. Falls back to `"unknown"` if the lockfile is
+/// missing or the crate isn't present — the manifest is descriptive
 /// metadata, not load-bearing.
-fn ndarray_version() -> String {
+fn cargo_lock_version(crate_name: &str) -> String {
     let cargo_lock = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
@@ -190,21 +231,22 @@ fn ndarray_version() -> String {
     let Ok(content) = fs::read_to_string(&cargo_lock) else {
         return "unknown".to_string();
     };
-    let mut in_ndarray = false;
+    let target = format!("name = \"{crate_name}\"");
+    let mut in_section = false;
     for line in content.lines() {
         let trimmed = line.trim();
-        if trimmed == "name = \"ndarray\"" {
-            in_ndarray = true;
+        if trimmed == target {
+            in_section = true;
             continue;
         }
-        if in_ndarray && trimmed.starts_with("version = \"") {
+        if in_section && trimmed.starts_with("version = \"") {
             return trimmed
                 .trim_start_matches("version = \"")
                 .trim_end_matches('"')
                 .to_string();
         }
-        if in_ndarray && trimmed.starts_with("[[package]]") {
-            // moved past the ndarray section without finding a version
+        if in_section && trimmed.starts_with("[[package]]") {
+            // Moved past the section without finding a version.
             break;
         }
     }

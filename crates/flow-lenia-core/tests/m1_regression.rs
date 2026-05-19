@@ -31,12 +31,16 @@ struct Case {
 
 impl Case {
     fn filename(&self) -> String {
+        // M6.A.1 — the fixture filename now embeds the grid as
+        // `case_g{N}_ps{T,F}_bt{T,W}_c{1,3}.bin`. A.1 still runs the
+        // regression at the M1 baseline 32×32 only; A.2 will widen
+        // the case-set to the other grid sizes already generated.
         let ps = if self.paper_strict { 'T' } else { 'F' };
         let bt = match self.border {
             BorderMode::Torus => 'T',
             BorderMode::Wall => 'W',
         };
-        format!("case_ps{}_bt{}_c{}.bin", ps, bt, self.channels)
+        format!("case_g{}_ps{}_bt{}_c{}.bin", GRID, ps, bt, self.channels)
     }
 
     fn cfg(&self) -> FlowLeniaConfig {
