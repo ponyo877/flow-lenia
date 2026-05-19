@@ -39,6 +39,8 @@
 //! on the web — the surface's `present()` and the browser's redraw
 //! cycle drive queue progress instead.
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use flow_lenia_core::{
@@ -47,6 +49,7 @@ use flow_lenia_core::{
 };
 use flow_lenia_gpu::{GpuContext, GpuStepPipeline, VisualizePass};
 use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
 use web_time::Instant;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -55,6 +58,16 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::keyboard::{Key, NamedKey};
 use winit::platform::web::WindowAttributesExtWebSys;
 use winit::window::{Window, WindowId};
+
+// M4.5.1 — global state cell so both the winit `ApplicationHandler`
+// callbacks (keyboard / window events / async readback completions)
+// and the `requestAnimationFrame`-driven `tick()` function can reach
+// the same `AppState` without threading it through `App`. WASM is
+// single-threaded so `RefCell` is sufficient; every borrow scope is
+// kept tight and never crosses an `await` / `spawn_local`.
+thread_local! {
+    static APP_STATE: RefCell<Option<AppState>> = const { RefCell::new(None) };
+}
 
 const CANVAS_ID: &str = "flow-lenia-canvas";
 // Canvas CSS size in logical pixels. M4.1 widened to 768×512 so the
@@ -153,6 +166,8 @@ struct AppState {
     egui_ctx: egui::Context,
     egui_winit_state: egui_winit::State,
     egui_renderer: egui_wgpu::Renderer,
+    /// M4.5.1 — TEMPORARY. Remove after stutter root-cause fix.
+    frame_diag: FrameTimingDiag,
 }
 
 struct FpsCounter {
@@ -198,6 +213,78 @@ enum AppEvent {
     MassReadbackDone(Vec<f32>),
 }
 
+/// M4.5.1 — TEMPORARY frame-timing histogram. Drives a per-frame
+/// stutter diagnosis. Remove after the M4.5.1 root cause is fixed.
+///
+/// Captures two series in parallel:
+/// - `intervals_ms` — wall-clock between consecutive `about_to_wait`
+///   entries. This is the actual *displayed* frame cadence.
+/// - `render_durations_ms` — time spent inside the
+///   step + render_frame block (CPU side, excluding any vsync wait
+///   that `Surface::present` may impose).
+///
+/// Every 300 samples we log percentile stats and clear, so a steady
+/// 60fps run reports once every 5 seconds.
+struct FrameTimingDiag {
+    last_frame_start: Option<Instant>,
+    intervals_ms: Vec<f64>,
+    render_durations_ms: Vec<f64>,
+}
+
+impl FrameTimingDiag {
+    fn new() -> Self {
+        Self {
+            last_frame_start: None,
+            intervals_ms: Vec::with_capacity(400),
+            render_durations_ms: Vec::with_capacity(400),
+        }
+    }
+
+    fn tick(&mut self, now: Instant) {
+        if let Some(prev) = self.last_frame_start {
+            let elapsed_ms = now.duration_since(prev).as_secs_f64() * 1000.0;
+            self.intervals_ms.push(elapsed_ms);
+        }
+        self.last_frame_start = Some(now);
+    }
+
+    fn record_render(&mut self, dur_ms: f64) {
+        self.render_durations_ms.push(dur_ms);
+    }
+
+    fn maybe_report(&mut self) {
+        if self.intervals_ms.len() < 300 {
+            return;
+        }
+        let intervals = std::mem::take(&mut self.intervals_ms);
+        let renders = std::mem::take(&mut self.render_durations_ms);
+        log_frame_stats("interval", &intervals);
+        log_frame_stats("render", &renders);
+    }
+}
+
+fn log_frame_stats(label: &str, samples: &[f64]) {
+    if samples.is_empty() {
+        return;
+    }
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let n = sorted.len();
+    let mean = sorted.iter().sum::<f64>() / n as f64;
+    let min = sorted[0];
+    let max = sorted[n - 1];
+    let pick = |q: f64| sorted[((n as f64) * q).min((n - 1) as f64) as usize];
+    let slow_30 = samples.iter().filter(|&&x| x > 30.0).count();
+    let slow_50 = samples.iter().filter(|&&x| x > 50.0).count();
+    let slow_100 = samples.iter().filter(|&&x| x > 100.0).count();
+    log::info!(
+        "[frame_diag/{label}] n={n} mean={mean:.2} p50={:.2} p95={:.2} p99={:.2} min={min:.2} max={max:.2} slow>30={slow_30} >50={slow_50} >100={slow_100}",
+        pick(0.50),
+        pick(0.95),
+        pick(0.99),
+    );
+}
+
 /// M4.4 — pipeline rebuild requests parked on the AppState so the
 /// SidePanel closure can flag them without borrowing the heavy parts
 /// of state. Processed once per frame, after the egui closure returns.
@@ -222,7 +309,6 @@ enum RebuildRequest {
 const MASS_READBACK_INTERVAL: u32 = 30;
 
 struct App {
-    state: Option<AppState>,
     proxy: EventLoopProxy<AppEvent>,
     init_started: bool,
 }
@@ -230,7 +316,6 @@ struct App {
 impl App {
     fn new(proxy: EventLoopProxy<AppEvent>) -> Self {
         Self {
-            state: None,
             proxy,
             init_started: false,
         }
@@ -238,73 +323,15 @@ impl App {
 }
 
 impl ApplicationHandler<AppEvent> for App {
-    /// `winit 0.30.13` (web) + `wgpu 29` regressed the `request_redraw
-    /// → WindowEvent::RedrawRequested` dispatch path: the event never
-    /// arrives at `window_event`, so the M3.5-style "advance simulation
-    /// inside the RedrawRequested arm" loop never fires. EventLoop
-    /// itself is healthy (this method runs ~1000×/sec with
-    /// `ControlFlow::Poll`), so we drive rendering from here instead.
-    /// See `docs/known-issues.md` for the full diagnostic trail.
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if let Some(state) = self.state.as_mut() {
-            // M4.4 — pipeline rebuild requests parked by the SidePanel
-            // closure are picked up here, before stepping, so the
-            // "step → render" pair always sees a consistent pipeline.
-            if let Some(req) = state.pending_rebuild.take() {
-                match req {
-                    RebuildRequest::ApplyKernelCount => {
-                        log::info!(
-                            "rebuild: apply num_kernels = {} (seed = {})",
-                            state.cfg.num_kernels,
-                            state.seed
-                        );
-                    }
-                    RebuildRequest::NewSeed => {
-                        state.seed = state.seed.wrapping_add(1);
-                        log::info!("rebuild: new seed = {}", state.seed);
-                    }
-                    RebuildRequest::ApplyGridAndChannels => {
-                        log::info!(
-                            "rebuild: grid = {}x{} channels = {} (seed = {})",
-                            state.cfg.grid_width,
-                            state.cfg.grid_height,
-                            state.cfg.channels,
-                            state.seed
-                        );
-                    }
-                }
-                rebuild_pipeline(state);
-            }
-            if state.running {
-                for _ in 0..state.steps_per_frame {
-                    state.pipeline.step(&state.gpu);
-                }
-            }
-            render_frame(state);
-            // FpsCounter::tick logs once per second; capture the same
-            // value for the SidePanel label so we don't compute FPS
-            // twice.
-            if let Some(fps) = state.fps.tick(state.pipeline.step_count(), state.running) {
-                state.current_fps = fps;
-            }
-            // M4.3 — periodic activation readback, only while the
-            // simulation is moving. Paused state keeps the previously
-            // cached mass on screen.
-            if state.running {
-                state.frames_until_mass_readback =
-                    state.frames_until_mass_readback.saturating_sub(1);
-                if state.frames_until_mass_readback == 0 && !state.mass_readback_in_flight {
-                    trigger_mass_readback(state);
-                    state.frames_until_mass_readback = MASS_READBACK_INTERVAL;
-                }
-            }
-            // M4.2: progress the device's internal queue so any
-            // outstanding `map_async` callbacks (screenshot, mass
-            // readback) can fire. On native this is implicit; on the
-            // browser the wgpu runtime relies on us pumping it.
-            let _ = state.gpu.device.poll(wgpu::PollType::Poll);
-        }
-    }
+    /// M4.5.1 — render is now driven from JavaScript
+    /// `requestAnimationFrame` via the exported [`tick`] function,
+    /// pacing the simulation to the compositor instead of to the raw
+    /// `ControlFlow::Poll` cadence (which on Chrome 148 WebGPU runs
+    /// uncapped at ~130 fps and produces visible per-frame step
+    /// jitter — see `docs/known-issues.md` #4). With render off this
+    /// hook, we set `ControlFlow::Wait` and let the winit event loop
+    /// sleep until the next browser input event arrives.
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {}
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.init_started {
@@ -352,17 +379,19 @@ impl ApplicationHandler<AppEvent> for App {
                     state.gpu.adapter.get_info().name,
                     state.surface_config.format
                 );
-                self.state = Some(*state);
-                // `about_to_wait` will start driving render_frame from
-                // the next poll; no explicit request_redraw needed
-                // (and request_redraw is currently a no-op anyway —
-                // see the workaround note on `about_to_wait`).
+                // The RAF loop is already scheduled (see `start_raf_loop`
+                // in `run()`); it has been ticking as a no-op waiting
+                // for `APP_STATE` to populate. From the next animation
+                // frame onwards it will start advancing the simulation.
+                APP_STATE.with(|cell| *cell.borrow_mut() = Some(*state));
             }
             AppEvent::MassReadbackDone(mass) => {
-                if let Some(state) = self.state.as_mut() {
-                    state.cached_mass = mass;
-                    state.mass_readback_in_flight = false;
-                }
+                APP_STATE.with(|cell| {
+                    if let Some(state) = cell.borrow_mut().as_mut() {
+                        state.cached_mass = mass;
+                        state.mass_readback_in_flight = false;
+                    }
+                });
             }
         }
     }
@@ -373,64 +402,190 @@ impl ApplicationHandler<AppEvent> for App {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
-        let Some(state) = self.state.as_mut() else {
+        APP_STATE.with(|cell| {
+            let mut binding = cell.borrow_mut();
+            let Some(state) = binding.as_mut() else {
+                return;
+            };
+
+            // Hand every WindowEvent to egui first so future text inputs
+            // / sliders absorb their key strokes before our Space/r/q
+            // shortcuts fire. `EventResponse::consumed` says "this event
+            // was for me, don't double-handle it".
+            let egui_response = state
+                .egui_winit_state
+                .on_window_event(&state.window, &event);
+
+            match event {
+                WindowEvent::CloseRequested => {
+                    log::info!("close requested at step={}", state.pipeline.step_count());
+                    event_loop.exit();
+                }
+                WindowEvent::KeyboardInput {
+                    event:
+                        KeyEvent {
+                            logical_key,
+                            state: ElementState::Pressed,
+                            repeat: false,
+                            ..
+                        },
+                    ..
+                } if !egui_response.consumed => match logical_key.as_ref() {
+                    Key::Named(NamedKey::Space) => {
+                        state.running = !state.running;
+                        log::info!(
+                            "{} at step={}",
+                            if state.running { "resumed" } else { "paused" },
+                            state.pipeline.step_count()
+                        );
+                    }
+                    Key::Character("r") | Key::Character("R") => {
+                        reset_simulation(state);
+                    }
+                    Key::Character("q") | Key::Character("Q") => {
+                        // Closing the tab from WASM requires a user gesture
+                        // the browser may not grant; we still call exit()
+                        // and let the user / DESIGN.md M3.4 notes handle
+                        // the rest.
+                        log::info!("q pressed — requesting exit");
+                        event_loop.exit();
+                    }
+                    _ => {}
+                },
+                // The M4.1 winit-0.30.13 + wgpu-29 regression that made
+                // `RedrawRequested` undeliverable is irrelevant under
+                // the M4.5.1 RAF model (render is no longer requested
+                // through winit). Left here so that if upstream does
+                // restore delivery we still match the arm cleanly.
+                WindowEvent::RedrawRequested => {}
+                _ => {}
+            }
+        });
+    }
+}
+
+/// M4.5.1 — exported tick called from `requestAnimationFrame` in the
+/// host page (scheduled by [`start_raf_loop`]). This is now the *only*
+/// place that steps the simulation and renders, so the cadence matches
+/// what the compositor will actually display.
+///
+/// No-op until `APP_STATE` is populated by `AppEvent::GpuReady`. RAF is
+/// kicked off as soon as `run()` returns control to JS, so the first
+/// dozen or so animation frames are no-ops while WASM finishes async
+/// GPU init.
+#[wasm_bindgen]
+pub fn tick() {
+    APP_STATE.with(|cell| {
+        let mut binding = cell.borrow_mut();
+        let Some(state) = binding.as_mut() else {
             return;
         };
 
-        // Hand every WindowEvent to egui first so future text inputs
-        // / sliders absorb their key strokes before our Space/r/q
-        // shortcuts fire. `EventResponse::consumed` says "this event
-        // was for me, don't double-handle it". We deliberately do
-        // **not** honour `EventResponse::repaint` here — rendering is
-        // driven by `about_to_wait` as a workaround for the broken
-        // RedrawRequested dispatch (see that method's note).
-        let egui_response = state
-            .egui_winit_state
-            .on_window_event(&state.window, &event);
+        let frame_start = Instant::now();
+        // M4.5.1 — frame-timing diag (interval is the gap between two
+        // RAF-driven tick() entries, i.e. exactly what the user sees).
+        state.frame_diag.tick(frame_start);
 
-        match event {
-            WindowEvent::CloseRequested => {
-                log::info!("close requested at step={}", state.pipeline.step_count());
-                event_loop.exit();
-            }
-            WindowEvent::KeyboardInput {
-                event:
-                    KeyEvent {
-                        logical_key,
-                        state: ElementState::Pressed,
-                        repeat: false,
-                        ..
-                    },
-                ..
-            } if !egui_response.consumed => match logical_key.as_ref() {
-                Key::Named(NamedKey::Space) => {
-                    state.running = !state.running;
+        // M4.4 — pipeline rebuild requests parked by the SidePanel
+        // closure are picked up here, before stepping, so the
+        // "step → render" pair always sees a consistent pipeline.
+        if let Some(req) = state.pending_rebuild.take() {
+            match req {
+                RebuildRequest::ApplyKernelCount => {
                     log::info!(
-                        "{} at step={}",
-                        if state.running { "resumed" } else { "paused" },
-                        state.pipeline.step_count()
+                        "rebuild: apply num_kernels = {} (seed = {})",
+                        state.cfg.num_kernels,
+                        state.seed
                     );
                 }
-                Key::Character("r") | Key::Character("R") => {
-                    reset_simulation(state);
+                RebuildRequest::NewSeed => {
+                    state.seed = state.seed.wrapping_add(1);
+                    log::info!("rebuild: new seed = {}", state.seed);
                 }
-                Key::Character("q") | Key::Character("Q") => {
-                    // Closing the tab from WASM requires a user gesture
-                    // the browser may not grant; we still call exit()
-                    // and let the user / DESIGN.md M3.4 notes handle
-                    // the rest.
-                    log::info!("q pressed — requesting exit");
-                    event_loop.exit();
+                RebuildRequest::ApplyGridAndChannels => {
+                    log::info!(
+                        "rebuild: grid = {}x{} channels = {} (seed = {})",
+                        state.cfg.grid_width,
+                        state.cfg.grid_height,
+                        state.cfg.channels,
+                        state.seed
+                    );
                 }
-                _ => {}
-            },
-            // Kept for forward-compatibility: when upstream restores
-            // RedrawRequested delivery, simply route the render call
-            // here and remove the `about_to_wait`-based pump.
-            WindowEvent::RedrawRequested => {}
-            _ => {}
+            }
+            rebuild_pipeline(state);
         }
-    }
+        if state.running {
+            for _ in 0..state.steps_per_frame {
+                state.pipeline.step(&state.gpu);
+            }
+        }
+        render_frame(state);
+
+        let render_end = Instant::now();
+        let render_ms =
+            render_end.duration_since(frame_start).as_secs_f64() * 1000.0;
+        state.frame_diag.record_render(render_ms);
+        state.frame_diag.maybe_report();
+
+        if let Some(fps) = state.fps.tick(state.pipeline.step_count(), state.running) {
+            state.current_fps = fps;
+        }
+        if state.running {
+            state.frames_until_mass_readback =
+                state.frames_until_mass_readback.saturating_sub(1);
+            if state.frames_until_mass_readback == 0 && !state.mass_readback_in_flight {
+                trigger_mass_readback(state);
+                state.frames_until_mass_readback = MASS_READBACK_INTERVAL;
+            }
+        }
+        // wgpu 29 (web) needs an explicit poll for `map_async` callbacks
+        // to fire — see `docs/known-issues.md` #3.
+        let _ = state.gpu.device.poll(wgpu::PollType::Poll);
+    });
+}
+
+/// M4.5.1 — install the RAF self-rescheduling closure. Uses the canonical
+/// `Rc<RefCell<Option<Closure>>>` pattern so the same closure handle can
+/// be re-passed to `requestAnimationFrame` each frame (without leaking
+/// a fresh `Closure` per call).
+///
+/// Calling this once during `run()` is enough; the closure keeps itself
+/// scheduled forever and only stops if `tick()` panics, which the
+/// `console_error_panic_hook` will then surface in the JS console.
+fn start_raf_loop() {
+    let raf_holder: Rc<RefCell<Option<Closure<dyn FnMut()>>>> =
+        Rc::new(RefCell::new(None));
+    let raf_holder_clone = raf_holder.clone();
+    *raf_holder.borrow_mut() = Some(Closure::new(move || {
+        tick();
+        // Re-schedule ourselves for the next compositor frame. The
+        // borrow is released before we hand the Function back to
+        // `requestAnimationFrame`, so the JS engine is free to call us
+        // again on the next frame without any re-entrancy concerns.
+        let win = web_sys::window().expect("no window");
+        let cb = raf_holder_clone
+            .borrow()
+            .as_ref()
+            .expect("raf closure missing")
+            .as_ref()
+            .unchecked_ref::<js_sys::Function>()
+            .clone();
+        win.request_animation_frame(&cb)
+            .expect("requestAnimationFrame failed");
+    }));
+    let win = web_sys::window().expect("no window");
+    let cb = raf_holder
+        .borrow()
+        .as_ref()
+        .expect("raf closure missing")
+        .as_ref()
+        .unchecked_ref::<js_sys::Function>()
+        .clone();
+    win.request_animation_frame(&cb)
+        .expect("initial requestAnimationFrame failed");
+    // Intentionally leak the holder: the closure must outlive `run()`
+    // (which never returns on web because winit suspends via throw).
+    std::mem::forget(raf_holder);
 }
 
 /// M4.5 — pick the integer `upscale` and the matching square viewport
@@ -616,6 +771,7 @@ async fn build_app_state(window: Arc<Window>, proxy: EventLoopProxy<AppEvent>) -
         egui_ctx,
         egui_winit_state,
         egui_renderer,
+        frame_diag: FrameTimingDiag::new(),
     }
 }
 
@@ -1219,12 +1375,24 @@ pub fn run() {
     console_error_panic_hook::set_once();
     console_log::init_with_level(log::Level::Info).expect("console_log init failed");
 
-    log::info!("flow-lenia-web booting (M3.4 — full pipeline + visualize)");
+    log::info!("flow-lenia-web booting (M4.5.1 — RAF-driven render)");
+
+    // M4.5.1 — install the RAF-driven render loop BEFORE entering
+    // `event_loop.run_app`. The latter never returns on web (winit
+    // suspends via JS throw), so any setup after it would be unreachable.
+    // The RAF callback is a no-op while `APP_STATE` is empty; once
+    // `AppEvent::GpuReady` populates it, the next animation frame starts
+    // stepping + rendering.
+    start_raf_loop();
 
     let event_loop = EventLoop::<AppEvent>::with_user_event()
         .build()
         .expect("failed to create event loop");
-    event_loop.set_control_flow(ControlFlow::Poll);
+    // `Wait` instead of `Poll` — with RAF driving render, the winit
+    // event loop only needs to wake on browser input events. `Poll`
+    // would be a busy-wake that wastes the very CPU we're trying to
+    // recover with this milestone.
+    event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();
     let mut app = App::new(proxy);
     event_loop
