@@ -1219,30 +1219,54 @@ fn render_frame(state: &mut AppState) {
                 // in a ScrollArea so users can still reach Pause /
                 // Screenshot when the window is short.
                 egui::ScrollArea::vertical().show(ui, |ui| {
+                    // M4.6 — five labelled sections separated by spacing
+                    // and (light) separators. Each `ui.strong(...)` acts
+                    // as a sub-heading under the top-level "Flow-Lenia"
+                    // heading; `ui.small(...)` qualifies it with a
+                    // one-word hint about whether changes are live or
+                    // applied on click. Spacing values (4 / 6 / 10) are
+                    // tuned by eye in Chrome at the 250-px SidePanel
+                    // width — keep them in sync if SIDE_PANEL_W changes.
                     ui.heading("Flow-Lenia");
-                    ui.separator();
-                    // ─── Stats (M4.3) ──────────────────────────────
-                    ui.label(format!("FPS: {fps_before:.1}"));
+                    ui.add_space(4.0);
+
+                    // ─── Stats ─────────────────────────────────────
+                    ui.strong("Stats");
+                    ui.label(format!("FPS:  {fps_before:>5.1}"));
                     ui.label(format!("Step: {step_before}"));
                     ui.label(format!("Seed: {seed_before}"));
-                    ui.add_space(4.0);
-                    ui.label("Mass:");
+                    ui.add_space(2.0);
+                    ui.label("Mass");
                     for (c, &mass) in mass_before.iter().enumerate() {
-                        ui.label(format!("  C{c}: {mass:.2}"));
+                        // Monospace so the per-channel rows line up
+                        // regardless of the integer-part width.
+                        ui.label(
+                            egui::RichText::new(format!("  C{c}: {mass:>7.2}")).monospace(),
+                        );
                     }
+                    ui.add_space(10.0);
                     ui.separator();
-                    // ─── Parameters (M4.4, live) ───────────────────
+
+                    // ─── Parameters (live) ─────────────────────────
+                    ui.strong("Parameters");
+                    ui.small("live — apply on change");
+                    ui.add_space(2.0);
                     ui.checkbox(&mut live_paper_strict, "Paper strict");
-                    ui.label("Border:");
                     ui.horizontal(|ui| {
+                        ui.label("Border");
                         ui.radio_value(&mut live_border, BorderMode::Torus, "Torus");
                         ui.radio_value(&mut live_border, BorderMode::Wall, "Wall");
                     });
                     ui.add(egui::Slider::new(&mut live_dt, 0.05..=0.5).text("dt"));
                     ui.add(egui::Slider::new(&mut live_dd, 3..=7).text("dd"));
+                    ui.add_space(10.0);
                     ui.separator();
-                    // ─── Kernel set (M4.4, deferred / Apply) ───────
-                    ui.add(egui::Slider::new(&mut local_kernels, 1..=45).text("Kernels"));
+
+                    // ─── Kernels (deferred — Apply rebuilds pipeline) ──
+                    ui.strong("Kernels");
+                    ui.small("Apply rebuilds pipeline");
+                    ui.add_space(2.0);
+                    ui.add(egui::Slider::new(&mut local_kernels, 1..=45).text("count"));
                     ui.horizontal(|ui| {
                         if ui.button("Apply").clicked() {
                             apply_clicked = true;
@@ -1251,10 +1275,15 @@ fn render_frame(state: &mut AppState) {
                             new_seed_clicked = true;
                         }
                     });
+                    ui.add_space(10.0);
                     ui.separator();
-                    // ─── Grid / Channels (M4.5, deferred) ──────────
+
+                    // ─── Grid / Channels (deferred — Apply rebuilds) ──
+                    ui.strong("Grid");
+                    ui.small("Apply rebuilds pipeline");
+                    ui.add_space(2.0);
                     ui.horizontal(|ui| {
-                        ui.label("Grid:");
+                        ui.label("Size");
                         egui::ComboBox::from_id_salt("grid_combo")
                             .selected_text(format!("{0}×{0}", local_grid))
                             .show_ui(ui, |ui| {
@@ -1268,7 +1297,7 @@ fn render_frame(state: &mut AppState) {
                             });
                     });
                     ui.horizontal(|ui| {
-                        ui.label("Channels:");
+                        ui.label("Channels");
                         egui::ComboBox::from_id_salt("channels_combo")
                             .selected_text(format!("{}", local_channels))
                             .show_ui(ui, |ui| {
@@ -1284,8 +1313,12 @@ fn render_frame(state: &mut AppState) {
                     if ui.button("Apply Grid/Channels").clicked() {
                         apply_grid_clicked = true;
                     }
+                    ui.add_space(10.0);
                     ui.separator();
-                    // ─── Controls (M4.2) ───────────────────────────
+
+                    // ─── Actions ───────────────────────────────────
+                    ui.strong("Actions");
+                    ui.add_space(2.0);
                     let pause_label = if running_before { "Pause" } else { "Resume" };
                     if ui.button(pause_label).clicked() {
                         pause_clicked = true;
@@ -1296,8 +1329,14 @@ fn render_frame(state: &mut AppState) {
                     if ui.button("Screenshot").clicked() {
                         screenshot_clicked = true;
                     }
-                    ui.add_space(8.0);
-                    ui.label("Keys: Space / R / Q");
+                    ui.add_space(10.0);
+                    ui.separator();
+
+                    // ─── Keyboard hint ─────────────────────────────
+                    ui.strong("Keyboard");
+                    ui.small("Space — pause / resume");
+                    ui.small("R     — reset");
+                    ui.small("Q     — stop");
                 });
             });
     });
