@@ -176,12 +176,21 @@ fn m1_regression_g64() {
     run_grid_regression(64);
 }
 
+// M6.A.2.1 — g128 / g256 are gated behind `#[ignore]` because their
+// 100-step regression at the 128×128 / 256×256 grid takes ~3 minutes
+// (g128) and ~13 minutes (g256) on the M1 baseline, which is too slow
+// for default `cargo test` runs during M6 perf iterations. They still
+// run under `cargo test -- --include-ignored` (or by name with the
+// flag set), and the convention is to run the full set before pushing
+// any commit that could touch the simulator's numerical path.
 #[test]
+#[ignore = "heavy 128×128 regression (~3 min); --include-ignored to run"]
 fn m1_regression_g128() {
     run_grid_regression(128);
 }
 
 #[test]
+#[ignore = "heavy 256×256 regression (~13 min); --include-ignored to run"]
 fn m1_regression_g256() {
     run_grid_regression(256);
 }
