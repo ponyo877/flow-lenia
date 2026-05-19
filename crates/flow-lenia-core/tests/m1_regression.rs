@@ -3,13 +3,20 @@
 //!
 //! See the M1.15 README "Regression fixtures" section for the
 //! reproducibility contract. In short: identical Rust toolchain
-//! (1.87.0) and identical `ndarray` resolved version are required.
+//! (1.95.0 as of M6.A.1) and identical `ndarray` resolved version are
+//! required.
 //!
 //! The case list is hardcoded here (rather than parsed from
 //! `manifest.json`) so this test stays free of any JSON-parsing
 //! dependency. The manifest exists as human-readable provenance and
 //! can be re-derived from this code via
 //! `cargo run --release --bin generate_m1_fixtures`.
+//!
+//! M6.A.2 — split the original single `m1_regression_matches_baseline_fixtures`
+//! test into one `#[test]` per grid so `cargo test` reports the
+//! grid-level pass/fail breakdown directly and `cargo test
+//! m1_regression_g64` can run just that grid during M6 perf
+//! iterations.
 
 use flow_lenia_core::{
     config::{BorderMode, MixRule},
@@ -20,10 +27,10 @@ use std::path::PathBuf;
 
 const SEED: u64 = 42;
 const STEPS: u32 = 100;
-const GRID: u32 = 32;
 const NUM_KERNELS: u32 = 10;
 
 struct Case {
+    grid: u32,
     paper_strict: bool,
     border: BorderMode,
     channels: u32,
@@ -31,22 +38,18 @@ struct Case {
 
 impl Case {
     fn filename(&self) -> String {
-        // M6.A.1 — the fixture filename now embeds the grid as
-        // `case_g{N}_ps{T,F}_bt{T,W}_c{1,3}.bin`. A.1 still runs the
-        // regression at the M1 baseline 32×32 only; A.2 will widen
-        // the case-set to the other grid sizes already generated.
         let ps = if self.paper_strict { 'T' } else { 'F' };
         let bt = match self.border {
             BorderMode::Torus => 'T',
             BorderMode::Wall => 'W',
         };
-        format!("case_g{}_ps{}_bt{}_c{}.bin", GRID, ps, bt, self.channels)
+        format!("case_g{}_ps{}_bt{}_c{}.bin", self.grid, ps, bt, self.channels)
     }
 
     fn cfg(&self) -> FlowLeniaConfig {
         FlowLeniaConfig {
-            grid_width: GRID,
-            grid_height: GRID,
+            grid_width: self.grid,
+            grid_height: self.grid,
             channels: self.channels,
             dt: 0.2,
             sigma: 0.65,
@@ -61,12 +64,17 @@ impl Case {
     }
 }
 
-fn all_cases() -> Vec<Case> {
+/// Eight-case matrix (`paper_strict × border × channels`) at a single
+/// grid size. Mirrors the iteration order used by
+/// `generate_m1_fixtures`'s inner loop so fixture filenames and test
+/// case ordering stay in lock-step.
+fn cases_for_grid(grid: u32) -> Vec<Case> {
     let mut out = Vec::with_capacity(8);
     for &paper_strict in &[false, true] {
         for &border in &[BorderMode::Torus, BorderMode::Wall] {
             for &channels in &[1_u32, 3_u32] {
                 out.push(Case {
+                    grid,
                     paper_strict,
                     border,
                     channels,
@@ -104,9 +112,13 @@ fn read_f32_bin(path: PathBuf, expected_len: usize) -> Vec<f32> {
         .collect()
 }
 
-#[test]
-fn m1_regression_matches_baseline_fixtures() {
-    for case in &all_cases() {
+/// Run the 8-case regression for one grid size. Panics on the first
+/// mismatch (across any case, any element) with a message that names
+/// both the grid and the case filename so a future failure points
+/// directly at the offending `(grid, paper_strict, border, channels)`
+/// combination.
+fn run_grid_regression(grid: u32) {
+    for case in cases_for_grid(grid) {
         let cfg = case.cfg();
         let mut sim = FlowLeniaSimulator::new(cfg, SEED);
         sim.step_many(STEPS);
@@ -116,13 +128,15 @@ fn m1_regression_matches_baseline_fixtures() {
             .as_slice()
             .expect("activation should be contiguous");
 
-        let expected_len = (GRID as usize) * (GRID as usize) * (case.channels as usize);
+        let expected_len =
+            (case.grid as usize) * (case.grid as usize) * (case.channels as usize);
         let expected = read_f32_bin(fixture_path(&case.filename()), expected_len);
 
         assert_eq!(
             actual.len(),
             expected.len(),
-            "{}: shape mismatch (got {}, expected {})",
+            "grid={} {}: shape mismatch (got {}, expected {})",
+            grid,
             case.filename(),
             actual.len(),
             expected.len()
@@ -139,12 +153,35 @@ fn m1_regression_matches_baseline_fixtures() {
         if let Some((i, got, want)) = first_mismatch {
             let abs_err = (got - want).abs();
             panic!(
-                "{}: bit-equal mismatch at element {i} \
-                 (got = {got:e}, expected = {want:e}, abs_err = {abs_err:e}). \
+                "grid={grid} {}: bit-equal mismatch at element {i} \
+                 (got = {got:e} [bits 0x{:08x}], expected = {want:e} [bits 0x{:08x}], \
+                 abs_err = {abs_err:e}). \
                  Toolchain or `ndarray` may have changed — see README \
                  \"Regression fixtures\" for the reproducibility contract.",
-                case.filename()
+                case.filename(),
+                got.to_bits(),
+                want.to_bits()
             );
         }
     }
+}
+
+#[test]
+fn m1_regression_g32() {
+    run_grid_regression(32);
+}
+
+#[test]
+fn m1_regression_g64() {
+    run_grid_regression(64);
+}
+
+#[test]
+fn m1_regression_g128() {
+    run_grid_regression(128);
+}
+
+#[test]
+fn m1_regression_g256() {
+    run_grid_regression(256);
 }
