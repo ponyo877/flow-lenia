@@ -130,6 +130,17 @@ struct AppState {
     /// post `AppEvent::MassReadbackDone(...)` back into the event
     /// loop without borrowing `App`.
     proxy: EventLoopProxy<AppEvent>,
+    /// M4.4 — live config that the SidePanel sliders write into.
+    /// Lightweight changes (paper_strict / border / dt / dd) push
+    /// straight into the uniform via `pipeline.update_globals`;
+    /// num_kernels / `New Seed` rebuild the pipeline from scratch.
+    cfg: FlowLeniaConfig,
+    /// Current seed used to sample `KernelParams`. Mutated only by
+    /// `New Seed` (the M4.2 `Reset` button keeps `SEED`).
+    seed: u64,
+    /// Set by the Apply / New Seed buttons to defer the heavy
+    /// pipeline rebuild outside the egui closure.
+    pending_rebuild: Option<RebuildRequest>,
     // ─── egui ──────────────────────────────────────────────────────
     egui_ctx: egui::Context,
     egui_winit_state: egui_winit::State,
@@ -179,6 +190,19 @@ enum AppEvent {
     MassReadbackDone(Vec<f32>),
 }
 
+/// M4.4 — pipeline rebuild requests parked on the AppState so the
+/// SidePanel closure can flag them without borrowing the heavy parts
+/// of state. Processed once per frame, after the egui closure returns.
+#[derive(Copy, Clone)]
+enum RebuildRequest {
+    /// "Apply" button after a num_kernels change. Keeps the current
+    /// seed, resamples kernels at the new count.
+    ApplyKernelCount,
+    /// "New Seed" button. Advances the seed and resamples kernels at
+    /// the current count.
+    NewSeed,
+}
+
 /// Frames between successive `trigger_mass_readback` calls. 30 ≈
 /// 0.5 s at the ~60 Hz polling cycle, fast enough for the UI label
 /// to feel live but slow enough that the readback queue never
@@ -211,6 +235,25 @@ impl ApplicationHandler<AppEvent> for App {
     /// See `docs/known-issues.md` for the full diagnostic trail.
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         if let Some(state) = self.state.as_mut() {
+            // M4.4 — pipeline rebuild requests parked by the SidePanel
+            // closure are picked up here, before stepping, so the
+            // "step → render" pair always sees a consistent pipeline.
+            if let Some(req) = state.pending_rebuild.take() {
+                match req {
+                    RebuildRequest::ApplyKernelCount => {
+                        log::info!(
+                            "rebuild: apply num_kernels = {} (seed = {})",
+                            state.cfg.num_kernels,
+                            state.seed
+                        );
+                    }
+                    RebuildRequest::NewSeed => {
+                        state.seed = state.seed.wrapping_add(1);
+                        log::info!("rebuild: new seed = {}", state.seed);
+                    }
+                }
+                rebuild_pipeline(state);
+            }
             if state.running {
                 for _ in 0..state.steps_per_frame {
                     state.pipeline.step(&state.gpu);
@@ -527,6 +570,9 @@ async fn build_app_state(window: Arc<Window>, proxy: EventLoopProxy<AppEvent>) -
         frames_until_mass_readback: 1,
         mass_readback_in_flight: false,
         proxy,
+        cfg,
+        seed: SEED,
+        pending_rebuild: None,
         egui_ctx,
         egui_winit_state,
         egui_renderer,
@@ -534,11 +580,23 @@ async fn build_app_state(window: Arc<Window>, proxy: EventLoopProxy<AppEvent>) -
 }
 
 fn reset_simulation(state: &mut AppState) {
-    let cfg = demo_cfg();
-    let cpu_sim = FlowLeniaSimulator::new(cfg, SEED);
+    // The keyboard Reset / `r` shortcut returns to the original
+    // SEED; M4.4 "New Seed" advances `state.seed` and reuses the
+    // same rebuild path through `apply_rebuild` instead.
+    state.seed = SEED;
+    rebuild_pipeline(state);
+    log::info!("simulation reset (seed = {})", state.seed);
+}
+
+/// M4.4 — rebuild the GPU pipeline against `state.cfg` and
+/// `state.seed`. Shared by Reset, "Apply" (after num_kernels change),
+/// and "New Seed". `step_count` is reset to 0 as a side-effect of
+/// constructing a fresh `GpuStepPipeline`.
+fn rebuild_pipeline(state: &mut AppState) {
+    let cpu_sim = FlowLeniaSimulator::new(state.cfg, state.seed);
     let initial_a = cpu_sim.activation().clone();
     let kernel_params = cpu_sim.kernel_params().clone();
-    state.pipeline = GpuStepPipeline::new(&state.gpu, &cfg, &kernel_params, &initial_a);
+    state.pipeline = GpuStepPipeline::new(&state.gpu, &state.cfg, &kernel_params, &initial_a);
     state.visualize_bind_groups = [
         state.visualize.make_bind_group(
             &state.gpu,
@@ -552,10 +610,7 @@ fn reset_simulation(state: &mut AppState) {
         ),
     ];
     state.running = true;
-    // Force a fresh mass readback now so the SidePanel doesn't keep
-    // showing the pre-reset values for half a second.
     state.frames_until_mass_readback = 1;
-    log::info!("simulation reset (seed = {SEED})");
 }
 
 /// Copy the current activation buffer into a staging buffer, then
@@ -843,9 +898,13 @@ fn render_frame(state: &mut AppState) {
     let step_before = state.pipeline.step_count();
     let fps_before = state.current_fps;
     let mass_before = state.cached_mass.clone();
+    let seed_before = state.seed;
+    let mut cfg_edit = state.cfg;
     let mut pause_clicked = false;
     let mut reset_clicked = false;
     let mut screenshot_clicked = false;
+    let mut apply_clicked = false;
+    let mut new_seed_clicked = false;
     // egui 0.34 deprecated `SidePanel::show(&Context, ...)` in favour
     // of a Ui-centric API (PR #5659 unifies SidePanel / TopBottomPanel
     // under a single `Panel` and pushes everyone toward
@@ -862,31 +921,58 @@ fn render_frame(state: &mut AppState) {
             .resizable(false)
             .exact_width(SIDE_PANEL_W as f32)
             .show(ctx, |ui| {
-                ui.heading("Flow-Lenia");
-                ui.separator();
-                // ─── Stats (M4.3) ──────────────────────────────────
-                ui.label(format!("FPS: {fps_before:.1}"));
-                ui.label(format!("Step: {step_before}"));
-                ui.label(format!("Seed: {SEED}"));
-                ui.add_space(4.0);
-                ui.label("Mass:");
-                for (c, &mass) in mass_before.iter().enumerate() {
-                    ui.label(format!("  C{c}: {mass:.2}"));
-                }
-                ui.separator();
-                // ─── Controls (M4.2) ────────────────────────────────
-                let pause_label = if running_before { "Pause" } else { "Resume" };
-                if ui.button(pause_label).clicked() {
-                    pause_clicked = true;
-                }
-                if ui.button("Reset").clicked() {
-                    reset_clicked = true;
-                }
-                if ui.button("Screenshot").clicked() {
-                    screenshot_clicked = true;
-                }
-                ui.add_space(8.0);
-                ui.label("Keys: Space / R / Q");
+                // SidePanel grew enough in M4.4 that the bottom rows can
+                // run off the canvas at small viewports — wrap the body
+                // in a ScrollArea so users can still reach Pause /
+                // Screenshot when the window is short.
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.heading("Flow-Lenia");
+                    ui.separator();
+                    // ─── Stats (M4.3) ──────────────────────────────
+                    ui.label(format!("FPS: {fps_before:.1}"));
+                    ui.label(format!("Step: {step_before}"));
+                    ui.label(format!("Seed: {seed_before}"));
+                    ui.add_space(4.0);
+                    ui.label("Mass:");
+                    for (c, &mass) in mass_before.iter().enumerate() {
+                        ui.label(format!("  C{c}: {mass:.2}"));
+                    }
+                    ui.separator();
+                    // ─── Parameters (M4.4, live) ───────────────────
+                    ui.checkbox(&mut cfg_edit.paper_strict, "Paper strict");
+                    ui.label("Border:");
+                    ui.horizontal(|ui| {
+                        ui.radio_value(&mut cfg_edit.border, BorderMode::Torus, "Torus");
+                        ui.radio_value(&mut cfg_edit.border, BorderMode::Wall, "Wall");
+                    });
+                    ui.add(egui::Slider::new(&mut cfg_edit.dt, 0.05..=0.5).text("dt"));
+                    ui.add(egui::Slider::new(&mut cfg_edit.dd, 3..=7).text("dd"));
+                    ui.separator();
+                    // ─── Kernel set (M4.4, deferred / Apply) ───────
+                    ui.add(egui::Slider::new(&mut cfg_edit.num_kernels, 1..=45).text("Kernels"));
+                    ui.horizontal(|ui| {
+                        if ui.button("Apply").clicked() {
+                            apply_clicked = true;
+                        }
+                        if ui.button("New Seed").clicked() {
+                            new_seed_clicked = true;
+                        }
+                    });
+                    ui.separator();
+                    // ─── Controls (M4.2) ───────────────────────────
+                    let pause_label = if running_before { "Pause" } else { "Resume" };
+                    if ui.button(pause_label).clicked() {
+                        pause_clicked = true;
+                    }
+                    if ui.button("Reset").clicked() {
+                        reset_clicked = true;
+                    }
+                    if ui.button("Screenshot").clicked() {
+                        screenshot_clicked = true;
+                    }
+                    ui.add_space(8.0);
+                    ui.label("Keys: Space / R / Q");
+                });
             });
     });
     // Apply button effects outside the closure so we have unrestricted
@@ -905,6 +991,32 @@ fn render_frame(state: &mut AppState) {
     if screenshot_clicked {
         let step = state.pipeline.step_count();
         trigger_screenshot(state, step);
+    }
+
+    // ─── M4.4 parameter updates ─────────────────────────────────────
+    // Light fields (paper_strict / border / dt / dd) feed straight
+    // into the existing globals uniform — no rebuild, step counter
+    // and creature continue from where they are. Only resample the
+    // pipeline when the user explicitly hits Apply or New Seed.
+    let lightweight_changed = cfg_edit.paper_strict != state.cfg.paper_strict
+        || cfg_edit.border != state.cfg.border
+        || (cfg_edit.dt - state.cfg.dt).abs() > f32::EPSILON
+        || cfg_edit.dd != state.cfg.dd;
+    // The Kernels slider also lives in `cfg_edit`, but its committed
+    // value is only adopted on Apply — surface only the "live" subset
+    // back into `state.cfg` here.
+    state.cfg.paper_strict = cfg_edit.paper_strict;
+    state.cfg.border = cfg_edit.border;
+    state.cfg.dt = cfg_edit.dt;
+    state.cfg.dd = cfg_edit.dd;
+    if lightweight_changed {
+        state.pipeline.update_globals(&state.gpu, &state.cfg);
+    }
+    if apply_clicked {
+        state.cfg.num_kernels = cfg_edit.num_kernels;
+        state.pending_rebuild = Some(RebuildRequest::ApplyKernelCount);
+    } else if new_seed_clicked {
+        state.pending_rebuild = Some(RebuildRequest::NewSeed);
     }
     state
         .egui_winit_state

@@ -780,6 +780,8 @@ dependencies = [
  "image",
  "js-sys",
  "log",
+ "rand",
+ "rand_chacha",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

@@ -334,6 +334,35 @@ impl GpuStepPipeline {
         self.step_count
     }
 
+    /// Push fresh `cfg` values (paper_strict / border / dt / dd /
+    /// sigma / n / beta_a) into the live uniform buffer without
+    /// rebuilding any bind groups. Cheap enough to call every frame
+    /// when a UI slider drags. Grid shape / kernel count come from
+    /// the existing pipeline state and are intentionally ignored —
+    /// changing those needs a full `GpuStepPipeline::new` (see M4.4
+    /// "Apply" / "New Seed" paths in `flow-lenia-web`).
+    pub fn update_globals(&self, ctx: &GpuContext, cfg: &FlowLeniaConfig) {
+        let globals = GpuGlobals::new(
+            self.height,
+            self.width,
+            self.channels,
+            self.kernel_buffers.count,
+            self.kernel_buffers.max_side,
+            cfg.border,
+        )
+        .with_paper_strict(cfg.paper_strict)
+        .with_beta_a(cfg.beta_a)
+        .with_n(cfg.n)
+        .with_dd(cfg.dd)
+        .with_sigma(cfg.sigma)
+        .with_dt(cfg.dt);
+        ctx.queue.write_buffer(
+            &self.globals_buf,
+            0,
+            cast_slice(std::slice::from_ref(&globals)),
+        );
+    }
+
     /// The buffer that holds the current activation state — the one
     /// `record_step` will read from next. Use this when wiring a
     /// downstream visualization pass; for CPU-side comparison call

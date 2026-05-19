@@ -48,6 +48,11 @@ egui-winit = { version = "0.34", default-features = false, features = ["links", 
 image = { version = "0.24", default-features = false, features = ["png"] }
 futures-channel = "0.3"
 bytemuck = { workspace = true }
+# Used by `New Seed` / kernel re-sample paths in M4.4. `rand_chacha`
+# matches the workspace simulator's PRNG choice, so seeds round-trip
+# identically between web and native.
+rand = { workspace = true }
+rand_chacha = { workspace = true }
 winit.workspace = true
 wasm-bindgen = "0.2.120"
 wasm-bindgen-futures = "0.4"
