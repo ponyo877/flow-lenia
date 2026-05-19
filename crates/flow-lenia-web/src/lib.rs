@@ -138,6 +138,14 @@ struct AppState {
     /// Current seed used to sample `KernelParams`. Mutated only by
     /// `New Seed` (the M4.2 `Reset` button keeps `SEED`).
     seed: u64,
+    /// M4.5 — staged values for the controls that only commit on
+    /// "Apply". Living on `AppState` so the ComboBox / Slider widgets
+    /// can `&mut` a stable target — without this the ComboBox
+    /// selection resets between frames because the egui closure
+    /// always sees `state.cfg.*`, never the user's pending pick.
+    pending_grid: u32,
+    pending_channels: u32,
+    pending_num_kernels: u32,
     /// Set by the Apply / New Seed buttons to defer the heavy
     /// pipeline rebuild outside the egui closure.
     pending_rebuild: Option<RebuildRequest>,
@@ -201,6 +209,10 @@ enum RebuildRequest {
     /// "New Seed" button. Advances the seed and resamples kernels at
     /// the current count.
     NewSeed,
+    /// M4.5 "Apply Grid/Channels" button. Resamples kernels at the
+    /// new grid shape *and* tears down the visualize pass so a fresh
+    /// `upscale` factor is picked.
+    ApplyGridAndChannels,
 }
 
 /// Frames between successive `trigger_mass_readback` calls. 30 ≈
@@ -250,6 +262,15 @@ impl ApplicationHandler<AppEvent> for App {
                     RebuildRequest::NewSeed => {
                         state.seed = state.seed.wrapping_add(1);
                         log::info!("rebuild: new seed = {}", state.seed);
+                    }
+                    RebuildRequest::ApplyGridAndChannels => {
+                        log::info!(
+                            "rebuild: grid = {}x{} channels = {} (seed = {})",
+                            state.cfg.grid_width,
+                            state.cfg.grid_height,
+                            state.cfg.channels,
+                            state.seed
+                        );
                     }
                 }
                 rebuild_pipeline(state);
@@ -412,6 +433,24 @@ impl ApplicationHandler<AppEvent> for App {
     }
 }
 
+/// M4.5 — pick the integer `upscale` and the matching square viewport
+/// that fits the current grid into the CentralPanel rect.
+///
+/// Returns `(upscale, viewport_side)` in physical pixels. The viewport
+/// is `(0, 0, viewport_side, viewport_side)` (square, top-left of the
+/// surface) — egui paints the SidePanel and any leftover space.
+fn compute_visualize_layout(grid_w: u32, grid_h: u32) -> (u32, u32) {
+    let dpr = web_sys::window()
+        .map(|w| w.device_pixel_ratio())
+        .unwrap_or(1.0);
+    let central_logical_w = CANVAS_W - SIDE_PANEL_W;
+    let central_physical_w = ((f64::from(central_logical_w) * dpr).round() as u32).max(grid_w);
+    let central_physical_h = ((f64::from(CANVAS_H) * dpr).round() as u32).max(grid_h);
+    let upscale = (central_physical_w.min(central_physical_h) / grid_w.max(grid_h)).max(1);
+    let viewport_side = upscale * grid_w.max(grid_h);
+    (upscale, viewport_side)
+}
+
 /// Resolve the canvas's physical pixel size at this moment.
 ///
 /// Why this exists: on winit/web `window.inner_size()` can briefly
@@ -507,26 +546,24 @@ async fn build_app_state(window: Arc<Window>, proxy: EventLoopProxy<AppEvent>) -
     let pipeline = GpuStepPipeline::new(&gpu, &cfg, &kernel_params, &initial_a);
 
     // ─── Visualize pass ────────────────────────────────────────────
-    // M4.1: Flow-Lenia no longer owns the full surface — egui's
-    // SidePanel takes `SIDE_PANEL_W` logical pixels on the right.
-    // Derive the *available* width and use it (rather than the full
-    // canvas width) to pick the integer `upscale` factor; this keeps
-    // the rendered creature square and fitting cleanly inside the
-    // CentralPanel rect.
+    // M4.1: Flow-Lenia shares the canvas with egui's SidePanel. The
+    // `compute_visualize_layout` helper picks the integer upscale +
+    // square viewport for the current grid; M4.5 rebuild paths reuse
+    // the same helper after a grid resize.
     let dpr = web_sys::window()
         .map(|w| w.device_pixel_ratio())
         .unwrap_or(1.0);
-    let central_logical_w = CANVAS_W - SIDE_PANEL_W;
-    let central_physical_w = ((f64::from(central_logical_w) * dpr).round() as u32).max(GRID_W);
-    let central_physical_h = ((f64::from(CANVAS_H) * dpr).round() as u32).max(GRID_H);
-    let upscale = (central_physical_w.min(central_physical_h) / GRID_W).max(1);
-    let viewport_side = upscale * GRID_W;
+    let (upscale, viewport_side) =
+        compute_visualize_layout(cfg.grid_width, cfg.grid_height);
     let flow_lenia_viewport = (0.0, 0.0, viewport_side as f32, viewport_side as f32);
     log::info!(
-        "visualize upscale = {upscale} (central panel = {central_physical_w}x{central_physical_h}, viewport side = {viewport_side})"
+        "visualize upscale = {upscale} (grid {}x{}, viewport side = {viewport_side})",
+        cfg.grid_width,
+        cfg.grid_height,
     );
     let visualize = VisualizePass::new(&gpu, format, upscale);
-    let visualize_globals_buf = visualize.upload_globals(&gpu, GRID_H, GRID_W, cfg.channels);
+    let visualize_globals_buf =
+        visualize.upload_globals(&gpu, cfg.grid_height, cfg.grid_width, cfg.channels);
     // Pre-build a bind group for each of the two ping-pong A buffers.
     let visualize_bind_groups = [
         visualize.make_bind_group(&gpu, pipeline.a_buffer(0), &visualize_globals_buf),
@@ -572,6 +609,9 @@ async fn build_app_state(window: Arc<Window>, proxy: EventLoopProxy<AppEvent>) -
         proxy,
         cfg,
         seed: SEED,
+        pending_grid: cfg.grid_width,
+        pending_channels: cfg.channels,
+        pending_num_kernels: cfg.num_kernels,
         pending_rebuild: None,
         egui_ctx,
         egui_winit_state,
@@ -581,22 +621,41 @@ async fn build_app_state(window: Arc<Window>, proxy: EventLoopProxy<AppEvent>) -
 
 fn reset_simulation(state: &mut AppState) {
     // The keyboard Reset / `r` shortcut returns to the original
-    // SEED; M4.4 "New Seed" advances `state.seed` and reuses the
-    // same rebuild path through `apply_rebuild` instead.
+    // SEED + cfg defaults; M4.4 "New Seed" advances `state.seed`
+    // and reuses the same rebuild path through `pending_rebuild`.
     state.seed = SEED;
+    state.cfg = demo_cfg();
+    state.pending_grid = state.cfg.grid_width;
+    state.pending_channels = state.cfg.channels;
+    state.pending_num_kernels = state.cfg.num_kernels;
     rebuild_pipeline(state);
     log::info!("simulation reset (seed = {})", state.seed);
 }
 
 /// M4.4 — rebuild the GPU pipeline against `state.cfg` and
-/// `state.seed`. Shared by Reset, "Apply" (after num_kernels change),
-/// and "New Seed". `step_count` is reset to 0 as a side-effect of
-/// constructing a fresh `GpuStepPipeline`.
+/// `state.seed`. Shared by Reset, "Apply Kernels", "New Seed", and
+/// M4.5 "Apply Grid/Channels". `step_count` is reset to 0 as a
+/// side-effect of constructing a fresh `GpuStepPipeline`.
+///
+/// VisualizePass is *also* recreated here so a grid-size change picks
+/// up a fresh `upscale` (M4.5). It's cheap — the WGSL is cached by
+/// the wgpu device and the bind-group layout is a one-shot.
 fn rebuild_pipeline(state: &mut AppState) {
     let cpu_sim = FlowLeniaSimulator::new(state.cfg, state.seed);
     let initial_a = cpu_sim.activation().clone();
     let kernel_params = cpu_sim.kernel_params().clone();
     state.pipeline = GpuStepPipeline::new(&state.gpu, &state.cfg, &kernel_params, &initial_a);
+
+    let (upscale, viewport_side) =
+        compute_visualize_layout(state.cfg.grid_width, state.cfg.grid_height);
+    state.flow_lenia_viewport = (0.0, 0.0, viewport_side as f32, viewport_side as f32);
+    state.visualize = VisualizePass::new(&state.gpu, state.surface_config.format, upscale);
+    state.visualize_globals_buf = state.visualize.upload_globals(
+        &state.gpu,
+        state.cfg.grid_height,
+        state.cfg.grid_width,
+        state.cfg.channels,
+    );
     state.visualize_bind_groups = [
         state.visualize.make_bind_group(
             &state.gpu,
@@ -609,6 +668,7 @@ fn rebuild_pipeline(state: &mut AppState) {
             &state.visualize_globals_buf,
         ),
     ];
+    state.cached_mass = vec![0.0; state.cfg.channels as usize];
     state.running = true;
     state.frames_until_mass_readback = 1;
 }
@@ -623,9 +683,8 @@ fn rebuild_pipeline(state: &mut AppState) {
 /// handler clears the flag when it installs the new value.
 fn trigger_mass_readback(state: &mut AppState) {
     state.mass_readback_in_flight = true;
-    let cfg = demo_cfg();
-    let channels = cfg.channels as usize;
-    let plane = (cfg.grid_width as usize) * (cfg.grid_height as usize);
+    let channels = state.cfg.channels as usize;
+    let plane = (state.cfg.grid_width as usize) * (state.cfg.grid_height as usize);
     let element_count = plane * channels;
     let bytes = (element_count * std::mem::size_of::<f32>()) as wgpu::BufferAddress;
 
@@ -704,13 +763,14 @@ fn align_to(x: u32, alignment: u32) -> u32 {
 /// Flow-Lenia output, so SNS shares are unobstructed.
 fn trigger_screenshot(state: &AppState, step: u64) {
     // Target a fixed maximum dimension, then pick the largest integer
-    // upscale that fits. With the default 64×64 grid this gives 16×
-    // upscale → 1024×1024 PNG; future grid sizes (M4.5) stay near the
-    // same file footprint instead of ballooning quadratically.
+    // upscale that fits. M4.5 made the grid size runtime-configurable,
+    // so read the live cfg instead of the compile-time constant.
     const PNG_MAX_DIM: u32 = 1024;
-    let upscale = (PNG_MAX_DIM / GRID_W).max(1);
-    let png_w = GRID_W * upscale;
-    let png_h = GRID_H * upscale;
+    let grid_w = state.cfg.grid_width;
+    let grid_h = state.cfg.grid_height;
+    let upscale = (PNG_MAX_DIM / grid_w.max(grid_h)).max(1);
+    let png_w = grid_w * upscale;
+    let png_h = grid_h * upscale;
 
     // Offscreen visualize at a known sRGB-correct format. Rgba8Unorm
     // is what the `image` PNG encoder expects bit-for-bit, so we
@@ -719,7 +779,8 @@ fn trigger_screenshot(state: &AppState, step: u64) {
     let queue = state.gpu.queue.clone();
     let activation_buf = state.pipeline.a_buffer(state.pipeline.ping_index()).clone();
     let visualize = VisualizePass::new(&state.gpu, wgpu::TextureFormat::Rgba8Unorm, upscale);
-    let globals_buf = visualize.upload_globals(&state.gpu, GRID_H, GRID_W, demo_cfg().channels);
+    let globals_buf =
+        visualize.upload_globals(&state.gpu, grid_h, grid_w, state.cfg.channels);
     let bind_group = visualize.make_bind_group(&state.gpu, &activation_buf, &globals_buf);
 
     let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -899,12 +960,30 @@ fn render_frame(state: &mut AppState) {
     let fps_before = state.current_fps;
     let mass_before = state.cached_mass.clone();
     let seed_before = state.seed;
-    let mut cfg_edit = state.cfg;
     let mut pause_clicked = false;
     let mut reset_clicked = false;
     let mut screenshot_clicked = false;
     let mut apply_clicked = false;
     let mut new_seed_clicked = false;
+    let mut apply_grid_clicked = false;
+    // Live "lightweight" cfg field snapshots — written by the egui
+    // closure, applied to `state.cfg` + the GPU uniform after the
+    // closure returns. The grid/channels/num_kernels controls write
+    // to `state.pending_*` directly so the ComboBox / Slider state
+    // persists across frames (a frame-local mirror would reset to
+    // `state.cfg.*` on each redraw and snap the dropdown back to its
+    // previous value).
+    let mut live_paper_strict = state.cfg.paper_strict;
+    let mut live_border = state.cfg.border;
+    let mut live_dt = state.cfg.dt;
+    let mut live_dd = state.cfg.dd;
+    // Mirror the AppState pending fields into closure-local vars so
+    // the egui closure can `&mut` them without colliding with the
+    // outer `state.egui_ctx.run` borrow. Written back to `state.*`
+    // immediately after the closure returns — same frame, no UX lag.
+    let mut local_grid = state.pending_grid;
+    let mut local_channels = state.pending_channels;
+    let mut local_kernels = state.pending_num_kernels;
     // egui 0.34 deprecated `SidePanel::show(&Context, ...)` in favour
     // of a Ui-centric API (PR #5659 unifies SidePanel / TopBottomPanel
     // under a single `Panel` and pushes everyone toward
@@ -939,17 +1018,17 @@ fn render_frame(state: &mut AppState) {
                     }
                     ui.separator();
                     // ─── Parameters (M4.4, live) ───────────────────
-                    ui.checkbox(&mut cfg_edit.paper_strict, "Paper strict");
+                    ui.checkbox(&mut live_paper_strict, "Paper strict");
                     ui.label("Border:");
                     ui.horizontal(|ui| {
-                        ui.radio_value(&mut cfg_edit.border, BorderMode::Torus, "Torus");
-                        ui.radio_value(&mut cfg_edit.border, BorderMode::Wall, "Wall");
+                        ui.radio_value(&mut live_border, BorderMode::Torus, "Torus");
+                        ui.radio_value(&mut live_border, BorderMode::Wall, "Wall");
                     });
-                    ui.add(egui::Slider::new(&mut cfg_edit.dt, 0.05..=0.5).text("dt"));
-                    ui.add(egui::Slider::new(&mut cfg_edit.dd, 3..=7).text("dd"));
+                    ui.add(egui::Slider::new(&mut live_dt, 0.05..=0.5).text("dt"));
+                    ui.add(egui::Slider::new(&mut live_dd, 3..=7).text("dd"));
                     ui.separator();
                     // ─── Kernel set (M4.4, deferred / Apply) ───────
-                    ui.add(egui::Slider::new(&mut cfg_edit.num_kernels, 1..=45).text("Kernels"));
+                    ui.add(egui::Slider::new(&mut local_kernels, 1..=45).text("Kernels"));
                     ui.horizontal(|ui| {
                         if ui.button("Apply").clicked() {
                             apply_clicked = true;
@@ -958,6 +1037,39 @@ fn render_frame(state: &mut AppState) {
                             new_seed_clicked = true;
                         }
                     });
+                    ui.separator();
+                    // ─── Grid / Channels (M4.5, deferred) ──────────
+                    ui.horizontal(|ui| {
+                        ui.label("Grid:");
+                        egui::ComboBox::from_id_salt("grid_combo")
+                            .selected_text(format!("{0}×{0}", local_grid))
+                            .show_ui(ui, |ui| {
+                                for &size in &[32u32, 64, 128, 256] {
+                                    ui.selectable_value(
+                                        &mut local_grid,
+                                        size,
+                                        format!("{size}×{size}"),
+                                    );
+                                }
+                            });
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Channels:");
+                        egui::ComboBox::from_id_salt("channels_combo")
+                            .selected_text(format!("{}", local_channels))
+                            .show_ui(ui, |ui| {
+                                for &c in &[1u32, 2, 3] {
+                                    ui.selectable_value(
+                                        &mut local_channels,
+                                        c,
+                                        format!("{c}"),
+                                    );
+                                }
+                            });
+                    });
+                    if ui.button("Apply Grid/Channels").clicked() {
+                        apply_grid_clicked = true;
+                    }
                     ui.separator();
                     // ─── Controls (M4.2) ───────────────────────────
                     let pause_label = if running_before { "Pause" } else { "Resume" };
@@ -993,27 +1105,37 @@ fn render_frame(state: &mut AppState) {
         trigger_screenshot(state, step);
     }
 
-    // ─── M4.4 parameter updates ─────────────────────────────────────
-    // Light fields (paper_strict / border / dt / dd) feed straight
-    // into the existing globals uniform — no rebuild, step counter
-    // and creature continue from where they are. Only resample the
-    // pipeline when the user explicitly hits Apply or New Seed.
-    let lightweight_changed = cfg_edit.paper_strict != state.cfg.paper_strict
-        || cfg_edit.border != state.cfg.border
-        || (cfg_edit.dt - state.cfg.dt).abs() > f32::EPSILON
-        || cfg_edit.dd != state.cfg.dd;
-    // The Kernels slider also lives in `cfg_edit`, but its committed
-    // value is only adopted on Apply — surface only the "live" subset
-    // back into `state.cfg` here.
-    state.cfg.paper_strict = cfg_edit.paper_strict;
-    state.cfg.border = cfg_edit.border;
-    state.cfg.dt = cfg_edit.dt;
-    state.cfg.dd = cfg_edit.dd;
+    // ─── M4.4 lightweight parameter updates ─────────────────────────
+    // paper_strict / border / dt / dd: push straight into the uniform.
+    let lightweight_changed = live_paper_strict != state.cfg.paper_strict
+        || live_border != state.cfg.border
+        || (live_dt - state.cfg.dt).abs() > f32::EPSILON
+        || live_dd != state.cfg.dd;
+    state.cfg.paper_strict = live_paper_strict;
+    state.cfg.border = live_border;
+    state.cfg.dt = live_dt;
+    state.cfg.dd = live_dd;
     if lightweight_changed {
         state.pipeline.update_globals(&state.gpu, &state.cfg);
     }
-    if apply_clicked {
-        state.cfg.num_kernels = cfg_edit.num_kernels;
+    // ─── M4.5 pending control values (persist across frames) ────────
+    // The ComboBox / Slider widgets mutate `local_*`; mirror them back
+    // into `state.pending_*` so the next frame's closure sees the
+    // user's choice. Only `state.cfg` changes on Apply / New Seed.
+    state.pending_grid = local_grid;
+    state.pending_channels = local_channels;
+    state.pending_num_kernels = local_kernels;
+    if apply_grid_clicked {
+        // Grid is always square; ComboBox edits a single value, mirror
+        // it into both width / height so the GpuStepPipeline assertion
+        // passes.
+        state.cfg.grid_width = state.pending_grid;
+        state.cfg.grid_height = state.pending_grid;
+        state.cfg.channels = state.pending_channels;
+        state.cfg.num_kernels = state.pending_num_kernels;
+        state.pending_rebuild = Some(RebuildRequest::ApplyGridAndChannels);
+    } else if apply_clicked {
+        state.cfg.num_kernels = state.pending_num_kernels;
         state.pending_rebuild = Some(RebuildRequest::ApplyKernelCount);
     } else if new_seed_clicked {
         state.pending_rebuild = Some(RebuildRequest::NewSeed);
