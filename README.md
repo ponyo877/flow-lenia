@@ -121,6 +121,23 @@ reintegrate, gradient). The two one-off measurement tests can be
 omitted when their previously-captured BENCH.md values are still
 known to apply.
 
+### A.4 vs A.5 — what fails when
+
+M6.A's GPU regression splits into two complementary layers; a failure
+on either tells you something different about an M6.C change:
+
+| `m1_regression_gpu` (A.4) | `gpu_snapshot_regression` (A.5) | Read as                                                              |
+|---------------------------|---------------------------------|----------------------------------------------------------------------|
+| fails                     | fails                           | Real numerical regression — the GPU has drifted from both CPU and its own pre-M6 self. |
+| fails                     | ok                              | GPU drifted from CPU but matches the old GPU — investigate whether the CPU side actually changed. |
+| ok                        | fails                           | GPU drifted from its old self while CPU agreement stayed in tolerance — acceptable M6.C drift if reviewed, else regression. |
+| ok                        | ok                              | All clear.                                                           |
+
+The A.5 snapshot is committed under
+`tests/regression_fixtures/gpu_baseline/` and refreshed by hand via
+`cargo test ... gpu_snapshot_regression generate_gpu_snapshots --
+--include-ignored` after an approved M6.C change.
+
 ### GPU regression tolerance (M6.A.4 + A.4.5)
 
 The four `gpu_field_regression_g{N}` tests use **tiered tolerances**

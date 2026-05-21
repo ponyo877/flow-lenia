@@ -1,0 +1,144 @@
+{
+  "generated_at": "2026-05-21",
+  "rust_toolchain": "1.95.0",
+  "wgpu_version": "29.0.3",
+  "adapter": "Apple M1 (IntegratedGpu, Metal)",
+  "fixture_purpose": "M6.A.5 GPU output snapshot — pre-M6.C numerical-path baseline",
+  "commit_sha": "fb9ccdb785be8cc1405a0b4a576bb138c1274fd6",
+  "num_kernels": 10,
+  "seed": 42,
+  "cases": [
+    {
+      "filename": "case_g32_psF_btT_c1.bin",
+      "grid": 32,
+      "paper_strict": false,
+      "border": "Torus",
+      "channels": 1,
+      "steps": 10,
+      "shape": [32, 32, 1],
+      "dtype": "f32_le",
+      "bytes": 4096
+    },
+    {
+      "filename": "case_g32_psF_btW_c1.bin",
+      "grid": 32,
+      "paper_strict": false,
+      "border": "Wall",
+      "channels": 1,
+      "steps": 10,
+      "shape": [32, 32, 1],
+      "dtype": "f32_le",
+      "bytes": 4096
+    },
+    {
+      "filename": "case_g32_psT_btT_c1.bin",
+      "grid": 32,
+      "paper_strict": true,
+      "border": "Torus",
+      "channels": 1,
+      "steps": 10,
+      "shape": [32, 32, 1],
+      "dtype": "f32_le",
+      "bytes": 4096
+    },
+    {
+      "filename": "case_g32_psT_btW_c1.bin",
+      "grid": 32,
+      "paper_strict": true,
+      "border": "Wall",
+      "channels": 1,
+      "steps": 10,
+      "shape": [32, 32, 1],
+      "dtype": "f32_le",
+      "bytes": 4096
+    },
+    {
+      "filename": "case_g64_psF_btT_c1.bin",
+      "grid": 64,
+      "paper_strict": false,
+      "border": "Torus",
+      "channels": 1,
+      "steps": 5,
+      "shape": [64, 64, 1],
+      "dtype": "f32_le",
+      "bytes": 16384
+    },
+    {
+      "filename": "case_g64_psF_btW_c1.bin",
+      "grid": 64,
+      "paper_strict": false,
+      "border": "Wall",
+      "channels": 1,
+      "steps": 5,
+      "shape": [64, 64, 1],
+      "dtype": "f32_le",
+      "bytes": 16384
+    },
+    {
+      "filename": "case_g64_psT_btT_c1.bin",
+      "grid": 64,
+      "paper_strict": true,
+      "border": "Torus",
+      "channels": 1,
+      "steps": 5,
+      "shape": [64, 64, 1],
+      "dtype": "f32_le",
+      "bytes": 16384
+    },
+    {
+      "filename": "case_g64_psT_btW_c1.bin",
+      "grid": 64,
+      "paper_strict": true,
+      "border": "Wall",
+      "channels": 1,
+      "steps": 5,
+      "shape": [64, 64, 1],
+      "dtype": "f32_le",
+      "bytes": 16384
+    },
+    {
+      "filename": "case_g128_psF_btT_c1.bin",
+      "grid": 128,
+      "paper_strict": false,
+      "border": "Torus",
+      "channels": 1,
+      "steps": 3,
+      "shape": [128, 128, 1],
+      "dtype": "f32_le",
+      "bytes": 65536
+    },
+    {
+      "filename": "case_g128_psF_btW_c1.bin",
+      "grid": 128,
+      "paper_strict": false,
+      "border": "Wall",
+      "channels": 1,
+      "steps": 3,
+      "shape": [128, 128, 1],
+      "dtype": "f32_le",
+      "bytes": 65536
+    },
+    {
+      "filename": "case_g128_psT_btT_c1.bin",
+      "grid": 128,
+      "paper_strict": true,
+      "border": "Torus",
+      "channels": 1,
+      "steps": 3,
+      "shape": [128, 128, 1],
+      "dtype": "f32_le",
+      "bytes": 65536
+    },
+    {
+      "filename": "case_g128_psT_btW_c1.bin",
+      "grid": 128,
+      "paper_strict": true,
+      "border": "Wall",
+      "channels": 1,
+      "steps": 3,
+      "shape": [128, 128, 1],
+      "dtype": "f32_le",
+      "bytes": 65536
+    }
+  ]
+}
