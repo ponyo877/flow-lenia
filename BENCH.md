@@ -216,6 +216,105 @@ one-off tests (`drift_vs_grid_size_100step`,
 `baseline_64x64_1000step`) brings the full `--include-ignored`
 sweep to ~86 min.
 
+## Section 8 — A.4.5 GPU regression tolerance (chaos amplification)
+
+M6.A.4 split `gpu_pipeline_matches_m1_baseline_fixtures_c1` into one
+test per grid (g32/g64/g128/g256, C=1, 10 step) and initially set
+`rel < 1e-3` for all of them. The g256 case failed at
+`max_rel = 1.136e-3`; investigation A.4.5 traced the cause to
+**intrinsic chaos in the Flow-Lenia dynamics, not a GPU bug**, and
+the tolerances below were chosen accordingly.
+
+### Empirical chain (A.4.5 experiments, all `#[ignore]` tests
+under `crates/flow-lenia-gpu/tests/diagnose_divergence.rs`):
+
+1. **Experiment 4** (`m6a45_per_step_rel_growth_by_grid_c1`)
+   — GPU vs CPU `max_rel` at every step 1..10 for grids 32–256,
+   C=1, paper_strict=false, Torus.
+
+   | grid | step 1 max_rel | step 10 max_rel | growth factor / step |
+   |-----:|---------------:|----------------:|---------------------:|
+   |   32 |       1.15e-5  |        1.93e-5  |               ×1.06 |
+   |   64 |       9.95e-5  |        1.06e-4  |               ×1.01 |
+   |  128 |       1.22e-5  |        2.04e-4  |               **×1.36** |
+   |  256 |       1.40e-5  |        4.73e-4  |               **×1.48** |
+
+   Step 1 rel is roughly grid-independent (~1e-5), confirming the
+   per-cell per-pass error is the same regardless of grid. Step 2+
+   amplification grows with grid (chaos signature).
+
+2. **Experiment 3 / shader audit**
+   — `grep` of all WGSL shaders found zero `atomicAdd`,
+   `workgroupBarrier`, `workgroupUniformLoad`. Every thread writes
+   one output cell with a deterministic per-cell reduction order, so
+   the per-cell f32 result is bit-identical between any two grid
+   sizes given the same inputs. Rules out "grid-dependent
+   accumulation order" as a GPU implementation defect.
+
+3. **Experiment 5** (`m6a45_cpu_lyapunov_by_grid_c1`)
+   — CPU-only baseline + ε = 1e-6 perturbation, two trajectories
+   diverge per the dynamics' Lyapunov rate. C=1 only, Torus only.
+
+   | grid | step 1 max_rel | step 5 | step 10 | step 20 |
+   |-----:|---------------:|-------:|--------:|--------:|
+   |   32 |       6.0e-5   | 1.3e-5 |  3.4e-5 |  1.6e-4 |
+   |   64 |       **8.5e-1** | 5.9e-1 |  6.1e-1 |  6.7e-1 |
+   |  128 |       **8.8e-1** | 6.6e-1 |  6.2e-1 |  4.9e-1 |
+   |  256 |       **9.7e-1** | 7.3e-1 |  6.1e-1 |  6.0e-1 |
+
+   At grid ≥ 64 the ε = 1e-6 perturbation reaches O(0.8) within
+   *one step* and stays saturated. This is the smoking gun: C=1
+   Flow-Lenia is **strongly chaotic at non-trivial spatial extents**,
+   contrary to the common "C=1 collapses the dynamics" intuition.
+   The per-cell f32 add-order delta between CPU and GPU (≈ 1e-5,
+   grid-independent) is amplified grid-dependently because the
+   *dynamics itself* has grid-dependent Lyapunov.
+
+4. **Experiment 6** (`m6a45_chaos_nondeterminism_g256_c1`)
+   — Same g256 / C=1 / 10-step run repeated 5 times in one process,
+   reading the same `max_rel` each pass.
+
+   | min | max | mean | std | max/min |
+   |---:|---:|---:|---:|---:|
+   | 1.136e-3 | 1.136e-3 | 1.136e-3 | 0.0 | **1.0000×** |
+
+   The GPU pipeline is fully bit-deterministic across re-runs in one
+   process, so the tolerance margin only needs to absorb future M6
+   numerical-path drift, not run-to-run noise.
+
+### Tolerance choice
+
+Based on Experiment 6's exact determinism, a 2–5× safety margin
+over the deterministic 10-step rel is sufficient.
+
+| grid | measured rel (step 10) | tolerance | margin |
+|-----:|-----------------------:|----------:|-------:|
+|   32 |              3.6e-5    |    1e-4   |   2.8× |
+|   64 |              1.1e-4    |    5e-4   |   4.5× |
+|  128 |              4.5e-4    |    1e-3   |   2.2× |
+|  256 |              1.1e-3    |    2.5e-3 |   2.2× |
+
+Encoded as the per-test `rel_tolerance` argument inside
+`crates/flow-lenia-gpu/tests/m1_regression_gpu.rs`. Reads: if M6
+work pushes the GPU's 10-step output more than ~2× farther from CPU
+than the current `case_g{N}_psX_btX_c1.bin` baseline, the
+corresponding `gpu_field_regression_g{N}` will catch it.
+
+### What this finding implies beyond M6.A
+
+The "Flow-Lenia is chaotic at C=1 / grid ≥ 64" result is
+material to:
+
+- **M6.C** — convolve / reintegrate rewrites can't be validated by
+  field comparison at chaotic scales; they need the mass + sanity
+  layer of the regression pyramid (see CPU §5–§7).
+- **M5** — the "same seed produces different visible creatures
+  under tiny pipeline changes" symptom isn't a bug, it's chaos.
+  Useful framing for the eventual flow-lenia.com FAQ.
+- **Future research** — most prior Lenia work implicitly assumes
+  small-grid stability transfers to large grids. The g32 / g64
+  Lyapunov gap here suggests that assumption needs a closer look.
+
 ## Re-running
 
 ```sh

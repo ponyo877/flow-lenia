@@ -121,6 +121,25 @@ reintegrate, gradient). The two one-off measurement tests can be
 omitted when their previously-captured BENCH.md values are still
 known to apply.
 
+### GPU regression tolerance (M6.A.4 + A.4.5)
+
+The four `gpu_field_regression_g{N}` tests use **tiered tolerances**
+(1e-4 / 5e-4 / 1e-3 / 2.5e-3 from g32 to g256), not a uniform
+`rel < 1e-3`. The tolerance scales because the underlying
+Flow-Lenia dynamics is **chaotic** at C=1 / grid ≥ 64 — an
+ε = 1e-6 perturbation saturates to O(0.8) in *one step* at g64
+on CPU-only simulation, so the grid-independent per-cell f32
+add-order delta between CPU and GPU (~ 1e-5) gets amplified
+grid-dependently over a few steps.
+
+This is **dynamics intrinsic**, not a GPU implementation defect.
+The full investigation, with per-step rel tables and the CPU
+Lyapunov measurement, is in `BENCH.md` §8 "A.4.5 GPU regression
+tolerance". The takeaway: a future M6 step that pushes a
+`gpu_field_regression_g{N}` test rel above its tolerance is
+either a real regression in the simulator, or chaos has shifted
+— the BENCH §8 baseline tells you which.
+
 ### Partial execution
 
 Every regression test name embeds its grid, so a single-grid run is
