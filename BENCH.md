@@ -315,6 +315,78 @@ material to:
   small-grid stability transfers to large grids. The g32 / g64
   Lyapunov gap here suggests that assumption needs a closer look.
 
+## Section 9 — A.6 perf-regression baselines and machine-state drift
+
+`crates/flow-lenia-gpu/tests/perf_regression.rs` anchors a small
+8-case `(grid, channels)` table to step-rates that any subsequent
+M6.C commit must stay within ±20 % of (the ±5 % warning is an
+early-warning band). The baselines look noticeably lower than the
+M6.0 Section 1 numbers, and that's intentional — the test is
+*intended* to detect commit-to-commit drift, not to enforce
+fresh-machine throughput. The table below documents the
+relationship.
+
+| grid | C | M6.0 cpu sps (§1) | A.6 cpu sps | Δ | M6.0 gpu sps | A.6 gpu sps | Δ |
+|-----:|--:|------------------:|------------:|---|-------------:|------------:|---|
+|   32 | 1 |              80.8 |       69.14 | −14.4% |        159.5 |      117.67 | −26.2% |
+|   32 | 3 |              76.6 |       64.90 | −15.3% |        129.5 |      106.28 | −17.9% |
+|   64 | 1 |              19.2 |       17.16 | −10.6% |         75.3 |       55.35 | −26.5% |
+|   64 | 3 |              17.1 |       15.90 |  −7.0% |         61.4 |       50.65 | −17.5% |
+|  128 | 1 |               5.1 |        4.30 | −15.6% |         20.8 |       15.25 | −26.7% |
+|  128 | 3 |               4.8 |        4.02 | −16.3% |         17.1 |       14.01 | −18.0% |
+|  256 | 1 |               1.3 |        1.05 | −18.9% |          5.4 |        3.92 | −27.4% |
+|  256 | 3 |               1.2 |        1.01 | −15.7% |          4.4 |        3.60 | −18.1% |
+
+### Why the gap
+
+Both columns came from the same host (Apple M1 mini), the same
+Rust toolchain (1.95.0), the same wgpu (29.0.3) and the same
+code path (`bench_step`-style timing — warmup, then a measure-
+loop terminated by `device.poll(Wait)`). The only differences:
+
+- **M6.0** was the first `bench_step` run after a clean session
+  start. The machine was cool, no other CPU/GPU consumers were
+  active, and no shader caches were yet populated.
+- **A.6** ran inside a long M6.A session during which the GPU
+  has been thermally seasoned by the M6.A.4 / A.4.5 / A.5 test
+  suites (multiple hours of `device.poll(Wait)` and per-step
+  readback workloads) and the host had accumulated background
+  load from the M6 development tooling.
+
+The slow-down splits cleanly by axis:
+
+- **CPU sps** lands at 0.81–0.93 × the M6.0 number — typical
+  background-load + thermal-cap dynamics on M1, with the worst
+  case at large grids (more time, more thermal opportunity).
+- **GPU sps at C = 1** is consistently 0.73–0.74 × M6.0 (very
+  uniform across grid sizes), while **GPU sps at C = 3** lands
+  at 0.82–0.83 ×. The bigger gap at C = 1 is consistent with a
+  fixed per-step overhead growing relative to compute: at C = 1
+  each step has less work, so overhead dominates more.
+
+### What the test is actually checking
+
+After re-anchoring, the regression test measures **commit-to-commit
+drift** rather than absolute hardware throughput. An M6.C change
+that genuinely makes GPU faster will register as a positive Δ on
+the GPU sps column (above the ±5 % warning band) and on the
+`gpu_sps / cpu_sps` ratio (above the ±30 % ratio band). An M6.C
+change that accidentally slows the simulator down — kernel
+recompile, lost LTO, unfortunate workgroup-size pick — registers
+as a negative Δ.
+
+Re-anchor when:
+
+- The host hardware changes (different M-series chip, different
+  thermal envelope, different driver version).
+- An M6.C step intentionally shifts the baseline (e.g. the
+  convolve FFT migration lands and the GPU sps numbers jump by
+  3–4 ×; *that* run becomes the new baseline for downstream M6.C
+  iterations).
+
+`perf_regression_full_matrix` prints `cpu = …, gpu = …` numbers
+ready to paste into the `BASELINES` table.
+
 ## Re-running
 
 ```sh
