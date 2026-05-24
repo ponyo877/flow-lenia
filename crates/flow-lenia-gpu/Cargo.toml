@@ -25,3 +25,7 @@ rand_chacha.workspace = true
 # Pinned to 0.24.x so we stay compatible with rust-toolchain.toml's
 # 1.87.0; image 0.25 requires 1.88+.
 image = { version = "0.24", default-features = false, features = ["png"] }
+# M6.A.8 heap regression — `#[global_allocator]` wrapper that records
+# current / peak heap usage. dev-only so production binaries
+# (`flow-lenia-app`, `flow-lenia-web`) keep the system allocator.
+peak_alloc = "0.3"

@@ -575,6 +575,162 @@ env-var gate inside `generate_gpu_snapshots` so even
 now require `FLOW_LENIA_REGEN_SNAPSHOTS=1 cargo test ... --
 generate_gpu_snapshots --include-ignored`.
 
+## Section 11 — A.8 heap-leak regression (10 000 step, CPU heap only)
+
+`crates/flow-lenia-gpu/tests/heap_regression.rs` runs a
+`GpuStepPipeline` for 10 000 steps at 64×64 / C=3 / Torus,
+brackets the loop with `peak_alloc::PeakAlloc` snapshots at three
+points (baseline → mid-loop → post-loop), and asserts on both a
+current-allocation delta (catches accumulating leaks in `current`)
+and a peak drift between mid and post (catches slow leaks visible
+only in `peak`, where a one-time transient would already have
+settled by the mid sample).
+
+### Methodology
+
+1. 100-step warmup, drain wgpu queue, read baseline `current` and
+   `peak`.
+2. Run 5 000 steps, drain queue, read mid `peak`.
+3. Run another 5 000 steps, drain queue, read post `current` and
+   `peak`.
+4. Assert `Δ current = post − baseline < CURRENT_DELTA_LIMIT_KB`
+   (signed — leaks are positive growth).
+5. Assert `peak drift = (post peak − baseline) − (mid peak − baseline)
+   < PEAK_DRIFT_LIMIT_KB` — a one-shot transient settles by step 5 K,
+   so a post-loop peak that climbs further is a slow growth signal.
+
+The two `device.poll(Wait)` calls are deliberate — they let any
+deferred drop-on-fence work run before each measurement so the
+comparison is between fully-quiesced states.
+
+### Tolerance derivation
+
+| const | value | basis |
+|---|---:|---|
+| `CURRENT_DELTA_LIMIT_KB` | 500 KB | ~ 2 × the observed transient (270 KB). Halved from the M6.A.8 initial 1 MB after adversarial-reviewer flagged that 1 MB hid a 50 B/step leak across 10 K steps. The current 500 KB band catches anything > 50 B/step sustained while still absorbing the one-time wgpu drop/poll transient. |
+| `PEAK_DRIFT_LIMIT_KB` | 256 KB | Discriminates transient (settles in first 5 K steps) from slow leak (keeps growing). Threshold sized for the per-half allocator noise band; tighter would trip on benign wgpu submission-ring resizing. |
+
+### Detection floor
+
+`CURRENT_DELTA_LIMIT_KB / N_STEPS_TOTAL` = 500 KB / 10 000 = **50
+B/step**. A sustained leak below that average rate doesn't push
+`Δ current` over the limit and slips through. To translate that
+floor into the operational regime:
+
+| leak rate | daily growth (60 fps `flow-lenia-app`) | when it surfaces in Activity Monitor |
+|---|---:|---|
+| 50 B/step (at floor) | 259 MB/day | first 8-hour session: ~ 86 MB |
+| 25 B/step (½ floor) | 130 MB/day | first multi-day session |
+| 5 B/step (1/10 floor) | 26 MB/day | days |
+| 1 B/step (1/50 floor) | 5 MB/day | week+ |
+
+The take-away: leaks the test *misses* are well below the rate
+that would damage an interactive session. Anything operationally
+material (≥ tens of MB per day of typical use) sits at or above
+the floor and surfaces. The earlier M6.A.8 draft of this paragraph
+claimed the test caught what it actually misses — corrected here
+after the adversarial-reviewer pass.
+
+### Measurement (M6.A.8 commit, M1 baseline)
+
+Two runs documented: the **initial run** (1 MB tolerance, no
+mid-loop sample) before the adversarial-reviewer pass, and the
+**review-driven run** (500 KB tolerance, 5 K mid + 5 K post split)
+after addressing the reviewer's concerns.
+
+Initial run (commit-pre-review snapshot):
+
+| reading | KB |
+|---|---:|
+| baseline current | 851.39 |
+| post current | 1 122.09 |
+| Δ current | **+270.70** |
+| baseline peak | 1 248.20 |
+| post peak | 2 390.25 |
+| Δ peak | **+1 142.05** |
+
+The +270 KB `Δ current` sits inside the 500 KB rewritten band.
+The +1.1 MB `Δ peak` was the trigger for adding the mid-sample
+discriminator — single-point peak measurement can't tell whether
+that climb settled early or kept going.
+
+Review-driven run with mid-loop sample (M6.A.8 commit, same host
+thermal state):
+
+| reading | KB | Δ from baseline |
+|---|---:|---:|
+| baseline current | 851.39 | — |
+| mid current | 1 122.09 | +270.70 |
+| post current | 1 122.09 | +270.70 |
+| baseline peak | 1 248.20 | — |
+| mid peak | 2 390.25 | +1 142.05 |
+| post peak | 2 396.25 | +1 148.05 |
+| **peak drift mid → post** | | **+6.00** (limit ±256) |
+
+Two observations that the single-point measurement could not have
+produced:
+
+- **`current` reached steady-state by step 5 K** (mid = post,
+  both 1 122.09 KB). The transient is fully held by step 5 K, no
+  ongoing per-step Rust allocation in the back half.
+- **Peak climbed +1 142 KB in the first half and only +6 KB in
+  the second.** This is the transient-vs-leak discriminator
+  paying off: the +1.1 MB peak observed in the initial single-
+  point run is now confirmed as a one-shot allocation that
+  settles inside the first 5 K steps, not a slow accumulation.
+
+Both assertions pass with margin: current Δ at 54 % of the 500 KB
+limit, peak drift at 2 % of the 256 KB limit. An M6.C refactor
+that introduces even a 100 B/step leak (1 MB across 10 K steps)
+would trip the current assertion well before any RSS growth shows
+up in interactive use.
+
+### Why one grid is sufficient
+
+Steady-state per-step Rust allocation in `GpuStepPipeline::step`
+is grid-independent by construction: one command-encoder build,
+six pass `record(...)` calls (no per-step bind-group reallocation
+— all bind groups are pre-built in `GpuStepPipeline::new`, see
+the M6.0 §3 bind-group audit), one queue submit, one ping-index
+swap. None of these per-step allocations scale with grid. The
+wgpu buffers that *do* scale with grid² are constructed once
+inside `new()` (outside the timed loop) and freed when the
+pipeline drops (outside the post-loop reading). A leak that
+survives the per-step loop will surface at 64×64 just as it would
+at 256×256, so the single grid choice rests on the architecture,
+not on grid-specific empirical evidence. If a future M6.C lands
+grid-dependent per-step allocation (unlikely but not impossible —
+e.g. a working buffer sized to N_kernels × grid²), this test
+would need a multi-grid extension.
+
+### Wall-clock
+
+The commit-time run measured **197 s** on a host thermally
+degraded by three prior `perf_regression` sweeps in the same
+session (M6.A.6 commit + two A.7 attempts). A cold-boot
+extrapolation from Section 1's `16.29 ms/step` × 10 000 steps
+puts the theoretical lower bound near 165 s, with the 100-step
+warmup + two drains adding under 5 s. No independent cold-boot
+run was taken in M6.A.8 — the "~ 80 s" wording in an earlier
+draft of this section was extrapolated from `bench_step`'s 1000-
+step measure, not from a 10 K-step cold run, and was deleted.
+The "M1 baseline" reference for §11 is therefore "the M6.A.8
+commit thermal envelope", not "cold-boot M1".
+
+### Scope: CPU-side heap only
+
+`peak_alloc` wraps `std::alloc::System` and reports only Rust
+allocations: `Vec`, `Box`, `String`, owned `Array3`, etc. **GPU
+memory** (wgpu buffers, textures, command encoders) is managed by
+the Metal driver outside the Rust allocator and does not surface
+in `current_usage_as_kb()`. M6.A.8 deliberately leaves GPU-side
+leak detection out (CLAUDE.md "Scope 制約" addition) — recoverable-
+from-Rust leaks are cheap to catch in CI, while wgpu-side leaks
+would typically appear as `Device::poll(Wait)` failures or test-
+time OOMs that the other regression layers already trip on.
+Manual GPU-memory monitoring via macOS Activity Monitor is the
+M6.A.9 recipe for the GPU side.
+
 ## Re-running
 
 ```sh
