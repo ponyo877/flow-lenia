@@ -387,6 +387,194 @@ Re-anchor when:
 `perf_regression_full_matrix` prints `cpu = …, gpu = …` numbers
 ready to paste into the `BASELINES` table.
 
+## Section 10 — A.7 WebGPU validation overhead
+
+`crates/flow-lenia-gpu/src/validation.rs` adds a `ValidationGuard`
+that installs `Device::on_uncaptured_error` and collects messages
+into an `Arc<Mutex<Vec<String>>>`. Tests opt in via
+`FLOW_LENIA_VALIDATE=1`; production callers (`flow-lenia-app`,
+`flow-lenia-web`) never opt in and stay on the default zero-overhead
+path. This section documents the perf cost of validation when it
+*is* enabled, so M6.C developers know what they're paying for the
+extra safety net.
+
+### Method
+
+`crates/flow-lenia-gpu/tests/perf_regression.rs` was run twice on
+the same M1 host:
+
+1. `cargo test --release -p flow-lenia-gpu --test perf_regression
+   -- --include-ignored --nocapture` (validation off).
+2. `FLOW_LENIA_VALIDATE=1 cargo test ...` (same command, validation
+   guard installed on the test's `GpuContext`).
+
+Both pass the test's 3-run-median variance mitigation, so the
+single-run numbers below carry the same ±2-3 % run-to-run jitter
+band as A.6.
+
+### Measurement attempt #1 — host with trunk serve restarting in parallel
+
+Single-pair (off vs on) against the M6.A.6 BASELINES, validation
+on run with `trunk serve` bring-up happening concurrently on the
+same host:
+
+| grid | C | cpu off | cpu on | cpu Δ | gpu off | gpu on | gpu Δ |
+|-----:|--:|--------:|-------:|------:|--------:|-------:|------:|
+|   32 | 1 |   69.14 |  67.51 | −2.4% |  117.67 | 119.38 | +1.5% |
+|   32 | 3 |   64.90 |  64.30 | −0.9% |  106.28 | 108.43 | +2.0% |
+|   64 | 1 |   17.16 |  17.10 | −0.3% |   55.35 |  56.35 | +1.8% |
+|   64 | 3 |   15.90 |  16.15 | +1.6% |   50.65 |  51.31 | +1.3% |
+|  128 | 1 |    4.30 |   4.31 | +0.3% |   15.25 |  15.69 | +2.9% |
+|  128 | 3 |    4.02 |   4.00 | −0.4% |   14.01 |  14.28 | +2.0% |
+|  256 | 1 |    1.05 |   0.90 | −14% |    3.92 |   3.16 | −19% |
+|  256 | 3 |    1.01 |   0.61 | −40% |    3.60 |   2.90 | −19% |
+
+Grids 32–128 showed apparent overhead < 3 %, but 256 looked terrible.
+The reviewer flagged this as "assumption-based dismissal of the 256
+row" — fair, and verified next.
+
+### Measurement attempt #2 — quiesced host (trunk stopped), thermal-matched off+on pair
+
+After stopping `trunk serve` and running validation-on and
+validation-off back-to-back (~25 min total), comparing the two runs
+against each other (not against the cold-boot BASELINES) cancels
+ambient drift to the extent possible without a real cooldown wait:
+
+| grid | C | cpu off | cpu on | cpu Δ | gpu off | gpu on | gpu Δ |
+|-----:|--:|--------:|-------:|------:|--------:|-------:|------:|
+|   32 | 1 |   59.93 |  52.62 | −12.2% |  53.26 |  35.04 | −34.2% |
+|   32 | 3 |   52.48 |  47.76 |  −9.0% |  45.05 |  56.37 | **+25.1%** |
+|   64 | 1 |   12.03 |  11.56 |  −3.9% |  24.61 |  24.83 |  +0.9% |
+|   64 | 3 |   12.04 |  12.07 |  +0.2% |  23.37 |  22.07 |  −5.6% |
+|  128 | 1 |    3.62 |   3.24 | −10.5% |   8.70 |   7.20 | −17.2% |
+|  128 | 3 |    3.33 |   2.95 | −11.4% |   9.31 |   6.07 | −34.8% |
+|  256 | 1 |    0.90 |   0.79 | −12.2% |   2.67 |   1.80 | −32.6% |
+|  256 | 3 |    0.85 |   0.76 | −10.6% |   2.65 |   1.74 | −34.3% |
+
+### What the two attempts actually say
+
+Both runs show **CPU sps drifting −10 % to −12 % between paired off
+and on runs** — but the CPU simulator never touches wgpu, so
+`Device::on_uncaptured_error` cannot slow it by even a percent. The
+CPU column is therefore measuring pure host-state noise: a paired
+~15 min off / ~15 min on cadence on this M1 mini shows ±10–12 %
+run-to-run on CPU sps after three consecutive `perf_regression`
+runs in the session (M6.A.6 commit + two A.7 attempts) push the
+host into thermal accumulation that doesn't recover inside a 30 s
+gap.
+
+That noise floor sits on the GPU column too. The GPU Δ at 64×1 is
++0.9 % — well inside noise — and at 64×3 is −5.6 %, also inside
+the CPU-derived ±12 % noise band. The larger 128 / 256 GPU drops
+(−17 % to −35 %) could be real validation overhead, could be a
+disproportionate thermal hit on larger compute work, or could be
+both — the experiment as run cannot decompose them.
+
+What is verifiable:
+
+- **Validation overhead is at most O(machine-noise) under
+  comparable conditions** — under the small-grid quiet
+  point (64 / 32) the off / on gap is in the same range as the
+  CPU-only noise floor.
+- **The first attempt's "< 3 %" small-grid numbers were a
+  best-case anchor**, not a contradiction: with the host less
+  thermally loaded, validation cost is small enough to disappear
+  into noise; with the host loaded, validation may compound the
+  load, but we have not measured "validation only".
+- **A cleaner overhead number would require a thermally-controlled
+  rig** (cooldown gaps between runs, per-case isolation, more
+  repetitions). That's research-level effort, out of scope for
+  M6.A.7.
+
+### Coverage scope
+
+`FLOW_LENIA_VALIDATE=1` covers **17 of 46** tests reported by
+`cargo test -p flow-lenia-gpu`. Per binary:
+
+| binary | tests | reaches `test_ctx()` |
+|---|---:|:---:|
+| `gpu_snapshot_regression` | 4 | ✓ |
+| `m1_regression_gpu` | 8 | ✓ |
+| `perf_regression` | 1 | ✓ |
+| `validation_smoke` | 1 | always-on (built-in guard) |
+| `visualize_test` | 3 | ✓ |
+| `diagnose_divergence` | 6 | ✗ (local `headless_ctx`) |
+| lib unit tests (`src/passes/*`, `pipeline.rs`) | 23 | ✗ (per-module `headless_ctx`) |
+| **total covered** | **17** | |
+| **total uncovered** | **29** | |
+
+The uncovered 29 are precisely the per-pass WGSL surface M6.C will
+rewrite (`convolve`, `affinity_growth`, `gradient`, `flow`,
+`reintegrate`) plus the diagnostic tests, so the gap is material.
+Logged as **M6.A.7.1 follow-up** (task #132): lift `test_ctx` into
+a module reachable from both trees, or wrap each local
+`headless_ctx` with the same env-var check; migrate
+`diagnose_divergence.rs` to `mod common; common::test_ctx()` at
+the same time.
+
+### Interpretation (with the scope caveat above)
+
+The two attempts above don't agree on a single overhead number,
+and the disagreement traces to host-state drift between paired
+runs, not to validation cost. What is defensible:
+
+- **Small grids (32 / 64): cost likely small, with one
+  attribution caveat.** Attempt #1 saw 32–128 stay inside ±3 %
+  against a cold-state baseline; attempt #2 at grid 64 shows
+  GPU Δ +0.9 % / −5.6 % — inside the paired CPU drift (−3.9 % /
+  +0.2 %) of the same paired runs. Both data points are
+  consistent with "validation cost ≤ small-grid CPU noise floor".
+  *Caveat*: attempt #2 at grid 32 shows GPU −34.2 % / +25.1 %
+  paired drift — the only positive Δ in the matrix and a large
+  excursion in both directions; the table attributes this to
+  host-state noise but an independent measurement at grid 32
+  would be needed to confirm validation cost stays small there
+  specifically.
+- **Large grids (128 / 256): not measurable from these two
+  attempts.** Attempt #2 shows GPU drops of 17–35 % at 128 / 256
+  while the CPU column drops only 10–12 %. We don't have a
+  physical model for why a 10 % CPU thermal hit would coincide
+  with a 35 % GPU hit purely from thermal — that ratio might be
+  driven by different DVFS curves on the Apple Silicon GPU vs.
+  CPU side, or it might be real validation cost, or both. The
+  experiment as run cannot decompose them. Treat the 35 % figure
+  as the **upper bound** for "validation + the thermal cost of
+  one extra ~15 min run", not as validation overhead alone.
+- **Do not use `FLOW_LENIA_VALIDATE=1` together with
+  `perf_regression` as a regression signal.** The
+  perf-regression ±5 % warn / ±20 % err bands were anchored to
+  the no-validation BASELINES; under host-state noise alone they
+  can trip, and adding validation cost on top makes the signal
+  worse. Run perf with validation off; run other integration
+  tests with validation on if live coverage of new shaders is
+  desired.
+- **A thermally-controlled rig** (cooldown gaps between runs,
+  per-case isolation, more repetitions) would be needed to pin
+  down a true validation-only overhead at 128 / 256. Out of
+  scope for M6.A.7.
+
+The validation guard caught **zero errors across the integration-
+test sweep** on the M6.A.7 commit — the integration-test surface of
+flow-lenia-gpu is validation-clean. A future M6.C shader change
+that trips the guard will surface immediately at the integration
+test where the bad command is issued, with the wgpu `Debug` chain
+(message + source location) in the panic output via
+`ValidationGuard::assert_no_errors`. Lib unit tests that touch the
+same shaders are *not* yet covered — see the M6.A.7.1 follow-up.
+
+### Resolved footgun
+
+`generate_gpu_snapshots` (M6.A.5) was `#[ignore]`-gated to prevent
+accidental snapshot overwrites, but `--include-ignored` still
+triggered it. The A.7 validation-on sweep tripped this once
+(manifest.json date + commit_sha got rewritten — the snapshot
+binaries themselves stayed bit-identical, as expected from A.4.5 /
+A.5 GPU determinism). M6.A.7 adds a `FLOW_LENIA_REGEN_SNAPSHOTS`
+env-var gate inside `generate_gpu_snapshots` so even
+`--include-ignored` no-ops by default; intentional regenerations
+now require `FLOW_LENIA_REGEN_SNAPSHOTS=1 cargo test ... --
+generate_gpu_snapshots --include-ignored`.
+
 ## Re-running
 
 ```sh

@@ -42,6 +42,8 @@
 //!    in the 5-30 s range so a thermal swing doesn't span the whole
 //!    measurement.
 
+mod common;
+
 use flow_lenia_core::{
     config::{BorderMode, MixRule},
     FlowLeniaConfig, FlowLeniaSimulator,
@@ -209,8 +211,7 @@ fn check_delta(label: &str, measured: f64, baseline: f64) -> Verdict {
 #[test]
 #[ignore = "M6.A.6 perf regression (~6-8 min on M1); --include-ignored to run"]
 fn perf_regression_full_matrix() {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-    let ctx = GpuContext::new_blocking(instance, None);
+    let (ctx, guard) = common::test_ctx();
 
     let mut warnings: Vec<String> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
@@ -294,5 +295,8 @@ fn perf_regression_full_matrix() {
             (ERROR_THRESHOLD * 100.0) as i32,
             errors.join("\n  ")
         );
+    }
+    if let Some(g) = &guard {
+        g.assert_no_errors();
     }
 }

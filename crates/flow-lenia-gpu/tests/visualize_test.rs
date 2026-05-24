@@ -8,6 +8,8 @@
 //! `target/m2_9_visualize_test.png` for human visual inspection
 //! (no assertion on pixel content).
 
+mod common;
+
 use flow_lenia_core::{
     config::{BorderMode, MixRule},
     state::ActivationField,
@@ -17,13 +19,17 @@ use flow_lenia_gpu::{
     activation_buffer::upload_activation, readback_rgba8_texture, GpuContext, GpuStepPipeline,
     VisualizePass,
 };
+use flow_lenia_gpu::validation::ValidationGuard;
 use ndarray::Array3;
 
 const TEXTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
-fn headless_ctx() -> GpuContext {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-    GpuContext::new_blocking(instance, None)
+/// Thin wrapper over `common::test_ctx()` — visualize_test predates
+/// the M6.A.7 helper; keeping the local function name minimises the
+/// per-test diff while routing through the env-var-gated validation
+/// guard.
+fn headless_ctx() -> (GpuContext, Option<ValidationGuard>) {
+    common::test_ctx()
 }
 
 /// Build an off-screen `Rgba8Unorm` colour target sized
@@ -94,7 +100,7 @@ fn pixel_at(bytes: &[u8], width: u32, x: u32, y: u32) -> (f32, f32, f32, f32) {
 /// (`round(v · 255)`), so the per-channel tolerance is `1/255 ≈ 4e-3`.
 #[test]
 fn visualize_constant_field_yields_uniform_color() {
-    let ctx = headless_ctx();
+    let (ctx, guard) = headless_ctx();
     let (h, w, c) = (16, 16, 3);
     let a: ActivationField = Array3::from_elem((h, w, c), 0.5);
     let upscale = 4;
@@ -120,6 +126,9 @@ fn visualize_constant_field_yields_uniform_color() {
         assert!((b - expected).abs() < tol, "B@{px},{py} = {b}");
         assert!((a_out - 1.0).abs() < tol, "A@{px},{py} = {a_out}");
     }
+    if let Some(g) = &guard {
+        g.assert_no_errors();
+    }
 }
 
 /// Channel→RGB mapping with C∈{1, 2, 3}. Each test case fills the
@@ -127,7 +136,7 @@ fn visualize_constant_field_yields_uniform_color() {
 /// centre pixel matches the expected `(r, g, b)`.
 #[test]
 fn visualize_channels_map_to_rgb_correctly() {
-    let ctx = headless_ctx();
+    let (ctx, guard) = headless_ctx();
     let upscale = 4;
     let tol = 1.5 / 255.0;
 
@@ -166,6 +175,9 @@ fn visualize_channels_map_to_rgb_correctly() {
         assert!((g - 0.4).abs() < tol, "C=3: G = {g}");
         assert!((b - 0.6).abs() < tol, "C=3: B = {b}");
     }
+    if let Some(g) = &guard {
+        g.assert_no_errors();
+    }
 }
 
 /// Render a real simulator state and save it as a PNG for human visual
@@ -176,7 +188,7 @@ fn visualize_channels_map_to_rgb_correctly() {
 /// PNG was written; the visual check is for the human reviewer.
 #[test]
 fn visualize_writes_png_for_visual_inspection() {
-    let ctx = headless_ctx();
+    let (ctx, guard) = headless_ctx();
     let cfg = FlowLeniaConfig {
         grid_width: 64,
         grid_height: 64,
@@ -214,4 +226,7 @@ fn visualize_writes_png_for_visual_inspection() {
 
     eprintln!("[M2.9] wrote {rw}×{rh} PNG to {}", path.display());
     assert!(path.exists(), "PNG was not actually written");
+    if let Some(g) = &guard {
+        g.assert_no_errors();
+    }
 }

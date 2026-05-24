@@ -232,32 +232,40 @@ fn run_field_regression(grid: u32, ctx: &GpuContext, rel_tolerance: f32) {
 // raw numbers and the chaos / Lyapunov interpretation.
 #[test]
 fn gpu_field_regression_g32() {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-    let ctx = GpuContext::new_blocking(instance, None);
+    let (ctx, guard) = common::test_ctx();
     run_field_regression(32, &ctx, 1e-4);
+    if let Some(g) = &guard {
+        g.assert_no_errors();
+    }
 }
 
 #[test]
 fn gpu_field_regression_g64() {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-    let ctx = GpuContext::new_blocking(instance, None);
+    let (ctx, guard) = common::test_ctx();
     run_field_regression(64, &ctx, 5e-4);
+    if let Some(g) = &guard {
+        g.assert_no_errors();
+    }
 }
 
 #[test]
 #[ignore = "heavy 128×128 GPU regression; --include-ignored to run"]
 fn gpu_field_regression_g128() {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-    let ctx = GpuContext::new_blocking(instance, None);
+    let (ctx, guard) = common::test_ctx();
     run_field_regression(128, &ctx, 1e-3);
+    if let Some(g) = &guard {
+        g.assert_no_errors();
+    }
 }
 
 #[test]
 #[ignore = "heavy 256×256 GPU regression; --include-ignored to run"]
 fn gpu_field_regression_g256() {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-    let ctx = GpuContext::new_blocking(instance, None);
+    let (ctx, guard) = common::test_ctx();
     run_field_regression(256, &ctx, 2.5e-3);
+    if let Some(g) = &guard {
+        g.assert_no_errors();
+    }
 }
 
 /// Short-horizon C=1 mass conservation. Added in M6.A.4 as a tight
@@ -267,8 +275,7 @@ fn gpu_field_regression_g256() {
 /// numerical path.
 #[test]
 fn gpu_mass_conservation_c1() {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-    let ctx = GpuContext::new_blocking(instance, None);
+    let (ctx, guard) = common::test_ctx();
 
     let cases = c1_cases_for_grid(32);
     let mut report: Vec<String> = Vec::new();
@@ -324,6 +331,9 @@ fn gpu_mass_conservation_c1() {
         eprintln!("{line}");
     }
     eprintln!();
+    if let Some(g) = &guard {
+        g.assert_no_errors();
+    }
 }
 
 /// Long-horizon mass conservation across the full 8-mode matrix at
@@ -331,8 +341,7 @@ fn gpu_mass_conservation_c1() {
 /// field regression intentionally skips.
 #[test]
 fn gpu_pipeline_mass_conservation_100_steps() {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-    let ctx = GpuContext::new_blocking(instance, None);
+    let (ctx, guard) = common::test_ctx();
 
     let mut report: Vec<String> = Vec::new();
 
@@ -398,6 +407,9 @@ fn gpu_pipeline_mass_conservation_100_steps() {
         eprintln!("{line}");
     }
     eprintln!();
+    if let Some(g) = &guard {
+        g.assert_no_errors();
+    }
 }
 
 /// M6.A.4 condition 5 — GPU drift vs grid size at constant step
@@ -409,8 +421,7 @@ fn gpu_pipeline_mass_conservation_100_steps() {
 #[test]
 #[ignore = "M6.A.4 GPU drift measurement (~2 min); --include-ignored to refresh BENCH.md"]
 fn gpu_drift_vs_grid_size_100step_c1() {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-    let ctx = GpuContext::new_blocking(instance, None);
+    let (ctx, guard) = common::test_ctx();
 
     eprintln!(
         "\n=== M6.A.4 GPU drift vs grid size at {DRIFT_STEPS} steps (C=1) ==="
@@ -453,6 +464,9 @@ fn gpu_drift_vs_grid_size_100step_c1() {
         }
     }
     eprintln!();
+    if let Some(g) = &guard {
+        g.assert_no_errors();
+    }
 }
 
 /// Bare-minimum per-step timing without per-step readback (the
@@ -460,8 +474,7 @@ fn gpu_drift_vs_grid_size_100step_c1() {
 /// the end. Kept from M2.8 — informational output only.
 #[test]
 fn gpu_pipeline_per_step_timing() {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-    let ctx = GpuContext::new_blocking(instance, None);
+    let (ctx, guard) = common::test_ctx();
 
     let case = Case {
         grid: 32,
@@ -499,4 +512,7 @@ fn gpu_pipeline_per_step_timing() {
 
     assert!(per_step_ms > 0.0);
     assert!(cpu_per_step_ms > 0.0);
+    if let Some(g) = &guard {
+        g.assert_no_errors();
+    }
 }

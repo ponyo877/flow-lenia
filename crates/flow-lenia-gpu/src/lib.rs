@@ -16,6 +16,7 @@ pub mod passes;
 pub mod pipeline;
 pub mod readback;
 pub mod texture_readback;
+pub mod validation;
 
 pub use activation_buffer::{
     flatten_activation_channel_major, readback_activation, unflatten_activation_channel_major,

@@ -198,8 +198,7 @@ fn run_gpu_at_case(case: &Case, n_steps: u32, ctx: &GpuContext) -> ActivationFie
 }
 
 fn run_snapshot_regression(grid: u32, n_steps: u32, rel_tolerance: f32) {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-    let ctx = GpuContext::new_blocking(instance, None);
+    let (ctx, guard) = common::test_ctx();
 
     let cases = cases_for_grid(grid);
     let mut per_case_summary: Vec<String> = Vec::new();
@@ -257,6 +256,9 @@ fn run_snapshot_regression(grid: u32, n_steps: u32, rel_tolerance: f32) {
          driver / wgpu version — check `tests/regression_fixtures/\
          gpu_baseline/manifest.json` for the recorded provenance."
     );
+    if let Some(g) = &guard {
+        g.assert_no_errors();
+    }
 }
 
 #[test]
@@ -275,14 +277,27 @@ fn gpu_snapshot_g128_3step() {
 }
 
 /// Regenerate the GPU snapshot binaries plus a fresh `manifest.json`.
-/// `#[ignore]` so a normal `cargo test` run never overwrites the
-/// committed baseline — invoke explicitly with `--include-ignored`
-/// after an approved M6.C numerical-path change.
+/// `#[ignore]` keeps it out of default `cargo test`, but
+/// `--include-ignored` would still trigger it — which means a routine
+/// "run every ignored test" sweep would silently rewrite the committed
+/// snapshots. M6.A.7 found this footgun (a validation-on sweep
+/// regenerated `manifest.json` with no other intent), so this guard
+/// requires `FLOW_LENIA_REGEN_SNAPSHOTS=1` as an additional explicit
+/// opt-in. Set it (with any value) only after an approved M6.C
+/// numerical-path change has been reviewed and the new GPU output is
+/// the intended baseline.
 #[test]
-#[ignore = "M6.A.5 snapshot regenerator; --include-ignored to overwrite the committed baseline"]
+#[ignore = "M6.A.5 snapshot regenerator; needs FLOW_LENIA_REGEN_SNAPSHOTS=1 to actually overwrite"]
 fn generate_gpu_snapshots() {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-    let ctx = GpuContext::new_blocking(instance, None);
+    if std::env::var("FLOW_LENIA_REGEN_SNAPSHOTS").is_err() {
+        eprintln!(
+            "[M6.A.5 generate_gpu_snapshots] no-op — set \
+             FLOW_LENIA_REGEN_SNAPSHOTS=1 to overwrite committed snapshots"
+        );
+        return;
+    }
+
+    let (ctx, guard) = common::test_ctx();
 
     let dir = snapshot_dir();
     fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("mkdir {}: {e}", dir.display()));
@@ -309,6 +324,9 @@ fn generate_gpu_snapshots() {
     }
 
     write_manifest(&dir, &written);
+    if let Some(g) = &guard {
+        g.assert_no_errors();
+    }
 }
 
 fn write_manifest(dir: &PathBuf, written: &[(Case, u32, usize)]) {
