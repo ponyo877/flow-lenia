@@ -232,17 +232,32 @@ python3 -m venv .venv-fixtures
 
 `.venv-fixtures/` is gitignored. CI does not need a JAX environment.
 
-## M1 regression fixtures
+## Regression fixture regeneration
 
-`crates/flow-lenia-core/tests/m1_regression.rs` asserts bit-equality
-between the simulator output and the 32 baseline fixtures committed
-under `tests/regression_fixtures/m1_baseline/` — 4 grid sizes (32, 64,
-128, 256) × 8 `paper_strict × border × C` cases each, 100 steps from
-`seed=42`. (M6.A.1 expanded the fixture set; 512×512 is intentionally
-skipped from bit-equal regression to keep the fixture footprint at
-5.4 MB on disk and the regeneration time at ~17 min; the
-mass-conservation suite covers 512.) Re-generate only when the
-dynamics or supporting infra intentionally changes:
+Three regression-fixture surfaces sit under
+`tests/regression_fixtures/` plus the `BASELINES` constants inside
+`perf_regression.rs`. Each has its own re-generation procedure and
+its own "when to re-generate" rule; treat them as separate
+contracts, because the failure modes if you regenerate at the wrong
+moment are different.
+
+### 1. M1 CPU baseline — `tests/regression_fixtures/m1_baseline/`
+
+`crates/flow-lenia-core/tests/m1_regression.rs` asserts bit-
+equality between the simulator output and the 32 baseline fixtures
+under `m1_baseline/` — 4 grid sizes (32, 64, 128, 256) × 8
+`paper_strict × border × C` cases each, 100 steps from `seed=42`.
+M6.A.1 expanded the fixture set; 512×512 is intentionally skipped
+from bit-equal regression to keep the on-disk footprint at 5.4 MB
+and the regeneration time at ~17 min (the mass-conservation suite
+covers 512 instead).
+
+**When to re-generate**: only when the dynamics or supporting infra
+intentionally changes — Rust toolchain bump, `ndarray` upgrade,
+deliberate per-pass numerical change. **Not** for "I made a code
+change and the test fails" — that's the bit-equality contract
+working as intended; the failure log tells you whether the change
+was intentional.
 
 ```sh
 cargo run --release --bin generate_m1_fixtures
@@ -250,11 +265,86 @@ cargo run --release --bin generate_m1_fixtures
 
 Bit-equality requires the **same Rust toolchain (1.95.0, pinned via
 `rust-toolchain.toml`)** and the **same resolved `ndarray` version**
-(see `manifest.json`); regenerate after either upgrade. The full
-mass-conservation matrix (5 grids, tiered step counts) lives in
-`tests/mass_conservation_1k.rs` and runs under the heavy
-`--include-ignored` flow described in
-*Regression test running guide* above.
+(see `manifest.json`); regenerate after either upgrade and review
+the diff before committing. The `manifest.json` records
+`commit_sha`, `rust_toolchain`, `wgpu_version`, and
+`fixture_purpose` at the time of generation so the snapshot's
+provenance is auditable from the file alone.
+
+### 2. GPU snapshot baseline — `tests/regression_fixtures/gpu_baseline/`
+
+`crates/flow-lenia-gpu/tests/gpu_snapshot_regression.rs` compares
+the current `GpuStepPipeline` output against 12 fixed snapshots
+under `gpu_baseline/` — 3 grids (32 × 10 step, 64 × 5 step, 128 × 3
+step) × 4 `paper_strict × border × C=1` cases. The step counts are
+short enough to stay inside the chaos-noise-floor (M6.A.4.5), so
+the snapshot remains a stable GPU-pipeline fingerprint rather than
+a CPU-baseline copy.
+
+**When to re-generate**: only after an approved M6.C numerical-path
+change has been reviewed and the new GPU output is the intended
+baseline. M6.A.5 added a `FLOW_LENIA_REGEN_SNAPSHOTS` env-var gate
+so even a blanket `--include-ignored` sweep no-ops by default;
+regeneration requires explicit opt-in:
+
+```sh
+FLOW_LENIA_REGEN_SNAPSHOTS=1 cargo test --release -p flow-lenia-gpu \
+    --test gpu_snapshot_regression -- generate_gpu_snapshots --include-ignored
+```
+
+GPU bit-determinism (verified across 3 days / multiple processes
+in M6.A.5 / A.7) means the regeneration produces byte-identical
+fixtures on the same hardware unless the simulator itself changed.
+A non-byte-identical regeneration is the signal that something
+*did* change — review the diff before committing the new snapshots
++ `manifest.json`.
+
+### 3. Performance baseline — `perf_regression::BASELINES` const
+
+`crates/flow-lenia-gpu/tests/perf_regression.rs` carries
+`BASELINES: &[(grid, channels, cpu_sps, gpu_sps)]` anchored to the
+M6.A.6 commit's typical-development-state numbers — **not** the
+cold-boot first-pass numbers in BENCH.md §1. Cold-boot vs warm-
+state on M1 differs by 7-27 % (BENCH §9), so anchoring to the
+cold-boot snapshot makes the regression test trip on the noise
+floor.
+
+**When to re-anchor**:
+- Host hardware changes (different M-series chip, different
+  thermal envelope).
+- An M6.C step intentionally shifts the baseline (e.g. the
+  convolve FFT migration lands and GPU sps jumps 3-4 ×; *that*
+  run becomes the new anchor for downstream M6.C iterations).
+- **Not** when the test trips on a single bad thermal run — verify
+  by 3 consecutive quiesced runs (CLAUDE.md "測定プロトコル",
+  paired-run + N=3 median) before treating it as a real shift. An
+  isolated single-run trip is noise; sustained 3/3 trips on a
+  quiesced host are signal. Skipping this check risks two opposite
+  failure modes: re-anchoring to a hot-host outlier (loses
+  regression sensitivity) or dismissing a real regression as
+  thermal (lets it through).
+
+To re-anchor: run `perf_regression_full_matrix --include-ignored
+--nocapture`, copy the `cpu = …, gpu = …` numbers from the
+per-case eprintln into the `BASELINES` table, and update BENCH.md
+§9 / §12 with the new anchor commit reference.
+
+```sh
+cargo test --release -p flow-lenia-gpu --test perf_regression \
+    -- --include-ignored --nocapture
+```
+
+For the full reference of which baseline counts as the M6.A anchor
+and how it relates to M6.0 / M6.C, see BENCH.md §12 "M6.A anchor
+for downstream comparison".
+
+### Heavy regression suite
+
+The full mass-conservation matrix (5 grids, tiered step counts) and
+the heap-leak regression run under the heavy `--include-ignored`
+flow described in *Regression test running guide* above. They do
+not need fixture re-generation — they re-compute everything per
+run.
 
 ## License
 

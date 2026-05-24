@@ -731,6 +731,196 @@ time OOMs that the other regression layers already trip on.
 Manual GPU-memory monitoring via macOS Activity Monitor is the
 M6.A.9 recipe for the GPU side.
 
+## Section 12 — M6.A anchor for downstream comparison
+
+M6.A closed with two distinct sets of perf baselines on file. This
+section is the canonical record of which set anchors what.
+
+### M6.0 cold-boot baseline (Section 1)
+
+Captured in `BENCH.md §1` at the M6.A.0 commit (`aed05f0`), on a
+freshly-restarted M1 mini with no other GPU/CPU consumers. These
+are the **best-case** numbers — useful as a historical reference
+("on a cold boot, the simulator can do this") but **not** the
+baseline against which M6.C regression should compare. Running
+`bench_step` immediately after a `cargo build` of a release binary
+will reproduce them only if the host hasn't yet thermally
+accumulated load from another perf run.
+
+### M6.A.6 typical-development-state baseline (`perf_regression::BASELINES`)
+
+Captured at the M6.A.6 commit (`f872f43`), with the same M1 mini
+already in its M6.A working-session thermal envelope (i.e. after
+M6.A.0-A.5 had run various test sweeps). These are the numbers
+hardcoded into `BASELINES` inside
+`crates/flow-lenia-gpu/tests/perf_regression.rs` and reproduced
+here for the record:
+
+| grid | C | cpu sps | gpu sps |
+|-----:|--:|--------:|--------:|
+|   32 | 1 |   69.14 |  117.67 |
+|   32 | 3 |   64.90 |  106.28 |
+|   64 | 1 |   17.16 |   55.35 |
+|   64 | 3 |   15.90 |   50.65 |
+|  128 | 1 |    4.30 |   15.25 |
+|  128 | 3 |    4.02 |   14.01 |
+|  256 | 1 |    1.05 |    3.92 |
+|  256 | 3 |    1.01 |    3.60 |
+
+### Which baseline applies when
+
+| use case | baseline | rationale |
+|---|---|---|
+| `perf_regression_full_matrix` ±5/±20 % bands | **A.6** | regression detection wants commit-to-commit drift, not cold-boot delta. Anchoring to the typical dev state means the test trips on a real change, not on whether the host has been hot for ten minutes. |
+| BENCH.md historical narrative | **M6.0** | reader wants to know "what was the cold-boot performance ceiling at M6 start". |
+| M6.C "did the FFT migration speed us up?" | **A.6** | the question is "did this commit improve over the last commit", and the last commit was anchored to A.6. |
+| M6.C "are we close to the 60 FPS goal at 512²?" | **new measurement at the M6.C step in question** | both M6.0 and A.6 are below 60 FPS at 256² (5.4 sps cold / 3.92 sps warm) and 512² isn't even in the BASELINES table, so the gap-to-goal question is dominated by whatever the current M6.C optimisation pass produces, not by which baseline you compare against. |
+| post-M6.C re-anchor | **new run** | once an M6.C step lands a numerical-path change with positive Δ, that run becomes the new anchor. Update `BASELINES` + this section + §9 in the same commit. |
+
+The Section 9 drift table (M6.0 → A.6 per-cell delta) remains the
+explanation for why these two baselines differ; this section is the
+operational mapping of "which one do I cite when".
+
+## Section 13 — M6.A retrospective
+
+This section is a single-stop summary of M6.A — what was built,
+what was found, what the M6.B / M6.C / M5 inheritors need to know.
+The narrative form complements the per-section measurements above;
+read the relevant Section 5-11 for the raw numbers and Section 12
+for the anchor mapping.
+
+### Sub-step inventory
+
+| sub-step | commit | one-line summary |
+|---|---|---|
+| M6.A.0 | `aed05f0` | `default-run = "native_gpu"` on flow-lenia-app |
+| M6.A.1 | `778aa24` | extend regression fixtures to grids {32, 64, 128, 256} |
+| M6.A.2 | `f0fe683` | split m1_regression into one #[test] per grid |
+| M6.A.2.1 | `4ee0079` | mark m1_regression_g128 / _g256 as #[ignore] |
+| M6.A.3 + A.10 + A.11 | `7f2d5d9` | mass conservation g32-g512 tiered + creature-alive sanity |
+| M6.A.4 + A.4.5 | `fb9ccdb` | GPU regression per grid + chaos-amplification root-cause |
+| M6.A.5 | `f5c5fe3` | GPU snapshot regression for pre/post M6.C comparison |
+| M6.A.6 | `f872f43` | perf_regression ±5 % warn / ±20 % err + GPU/CPU ratio |
+| M6.A.7 | `7053166` | WebGPU validation error assertion (test-only opt-in) |
+| M6.A.8 | `4efec2e` | native heap leak 10k-step regression (CPU heap only) |
+| CLAUDE.md measurement protocol | `7b71816` | paired run / quiesced / honest framing from A.6/A.7/A.8 |
+| M6.A.9 | *this commit* | BENCH §12/§13 + README regen procedures + DESIGN Rev.4.6 |
+
+Backlog (logged but deferred past M6.A close):
+
+- **M6.A.7.1** (task #132): extend `ValidationGuard` coverage to
+  the 23 lib unit tests in `src/passes/*` + `src/pipeline.rs` and
+  to `tests/diagnose_divergence.rs`. Recommended pickup point:
+  before M6.C-1, because the lib unit tests are the closest
+  test-side surface to the WGSL shaders M6.C will rewrite.
+
+### Key empirical findings
+
+1. **C=1 dynamics is strongly chaotic at grid ≥ 64** (Section 8).
+   ε = 1e-6 initial perturbation saturates to O(0.8) within one
+   step at g64 / g128 / g256, against the common "C=1 collapses
+   the chaos" intuition. Operationally: GPU vs CPU field rel
+   scales with grid² (not from any GPU implementation defect, but
+   because the same per-cell f32 add-order delta gets amplified by
+   the dynamics). M6.C field-level tolerance must be grid-tiered;
+   `rel < 1e-3` holds through 128 (measured 4.5e-4) but breaks at
+   256 (measured 1.136e-3). The committed tiered tolerances are
+   1e-4 / 5e-4 / 1e-3 / 2.5e-3 for g32 / g64 / g128 / g256.
+2. **GPU pipeline is bit-deterministic across processes and days**
+   (Section 8 Experiment 6 + M6.A.5 + M6.A.7 generate_gpu_snapshots
+   round-trip). Same code → byte-identical snapshot binaries. This
+   is what makes `gpu_snapshot_regression` viable as a regression
+   anchor; any non-byte-identical regeneration is a real signal.
+3. **Cold-boot vs warm-state perf differs 7-27 %** (Section 9).
+   M1 mini in a working M6 session accumulates thermal load that
+   the M6.0 cold-boot numbers can't represent. Section 12's
+   anchor-mapping rule (M6.C uses A.6, not M6.0) follows directly.
+4. **Validation overhead is undecomposable from thermal noise at
+   the M6.A measurement budget** (Section 10). Small grids (32-64)
+   show off/on Δ inside the CPU-derived ±12 % noise floor — the
+   data is consistent with "overhead ≤ noise floor" but does not
+   prove "overhead is small". At 128/256 the paired off/on Δ on
+   GPU sps is 17-35 %, while CPU sps drifts only 10-12 % between
+   the same paired runs; that ratio cannot be attributed to
+   validation alone without a thermally-controlled rig. Treat as
+   "not measured" for grids ≥ 128, not as "free". Coverage is
+   integration-test-only (17/46); lib unit tests deferred to A.7.1.
+5. **Steady-state Rust allocation in the GPU step path is grid-
+   independent** (Section 11). 10 K steps at 64×64 / C=3 leave
+   `current` flat after step 5 K; peak's +1.1 MB transient settles
+   in the first half (+6 KB drift in the second). The detection
+   floor is 50 B/step (CURRENT_DELTA_LIMIT_KB / N_STEPS_TOTAL); a
+   sustained 50 B/step leak would consume 259 MB/day at 60 sps
+   interactive use, so the test catches anything operationally
+   material.
+
+### Methodology that's now standing infrastructure
+
+The patterns below were developed during M6.A and are intended to
+carry forward unchanged through M6.B / M6.C / M5. CLAUDE.md
+"レビュー手順" / "Scope 制約" / "測定プロトコル" sections are the
+canonical text; this list is the index.
+
+- **5-layer numerical regression** (chaos test strategy memory):
+  bit-equal CPU / mass / CPU-GPU C=1 short / GPU pre-post / sanity.
+  Each layer has its own tolerance scenario; uniform "rel < X" is
+  not a viable model for chaotic dynamics at large grids.
+- **Subagent review workflow** (CLAUDE.md "レビュー手順"):
+  scope-guardian before implementation, adversarial-reviewer after.
+  Phase 2 from A.8 onwards: subagent approve → commit + push
+  without separate human pre-commit gate.
+- **Paired-run measurement protocol** (CLAUDE.md "測定プロトコル"):
+  off/on same machine state, quiesced host, N=3 median, honest
+  framing of noise-band vs signal, cold-boot vs warm-state
+  distinction. Lifted from A.6/A.7/A.8 measurement struggles into
+  a forward-acting rule.
+- **Tolerance derivation from observation, not from intuition**
+  (A.7 round 1, A.8 round 1): tolerances are sized at small
+  integer multiples of measured transients, with the detection
+  floor documented in the same place as the constant. "1 MB feels
+  safe" is not a derivation; "2 × observed 270 KB transient gives
+  500 KB band, floor 50 B/step" is.
+
+### Hand-off to M6.B / M6.C / M5
+
+**For M6.B literature survey** (next sub-stage, ~1 week):
+- Read BENCH §2 per-pass breakdown: convolve at 97.4 % is the
+  unambiguous M6.C target.
+- Read §8 chaos finding before assuming "FFT vs direct match
+  bit-perfectly". They will not; the M6.C field-level regression
+  must be A.4.5-tolerance-aware.
+- The literature survey itself decides the M6.C algorithm choice
+  (FFT family, input-format optimisation, batching, GPU
+  primitives, MPS-style reference). Bookmark target is
+  `docs/M6_literature_survey_draft.md`, created in a follow-up
+  commit (M6.B preparation, not part of M6.A.9).
+
+**For M6.C per-pass optimization** (after M6.B):
+- **Strongly recommended pre-condition**: complete M6.A.7.1 (task
+  #132) so lib unit tests also catch validation errors when the
+  WGSL is rewritten. Reasoning: the lib unit tests (`src/passes/*`)
+  are the closest surface to the WGSL changes M6.C will introduce,
+  and a validation error caught in `src/passes/convolve.rs::tests`
+  points at the exact pass; one caught only in
+  `m1_regression_gpu` is one step removed. Not a hard blocker if
+  M6.C lands first — just expect more diagnostic friction.
+- Each M6.C-N sub-step must pass `m1_regression_g*` (CPU bit-
+  equal), `mass_conservation_g*` (5-layer), `gpu_field_regression_g*`
+  (A.4.5 tiered), `gpu_snapshot_regression` (A.5 pre/post), and
+  not regress `perf_regression` by more than ±20 %.
+- The convolve FFT migration is expected to land a 3-4 × GPU sps
+  jump; treat *that* commit as the new perf anchor (see §12
+  "post-M6.C re-anchor" row).
+
+**For M5 evolutionary search** (after M6.C completes):
+- The "same seed produces different visible creatures under tiny
+  pipeline changes" symptom is the chaos finding from §8 in
+  visible form, not a bug. Useful framing for an eventual
+  flow-lenia.com FAQ.
+- Mass conservation is the right invariant for long-horizon
+  validation under chaos (the field comparison is meaningless past
+  the Lyapunov saturation timescale).
+
 ## Re-running
 
 ```sh

@@ -1,10 +1,57 @@
-# Flow-Lenia WebGPU Visualizer — 設計書 (Rev. 4.5)
+# Flow-Lenia WebGPU Visualizer — 設計書 (Rev. 4.6)
 
 本書は Rust + WebAssembly + WebGPU で **Flow-Lenia (Plantec et al., 2025, Artificial Life journal, arXiv:2506.08569v1)** を厳密に再現し、ブラウザ上でリアルタイム可視化する実装の設計書である。
 
 **実装の正典**は `papers/2506.08569v1.pdf` (2025年版) であり、Equation 番号は同論文を指す。副参照として `papers/2212.07906v2.pdf` (2023年版)、Moroz, 2020 "Reintegration tracking"、**公式 JAX 実装** `references/FlowLenia-jax/` (commit `dce428c`, 2024-02-08) を用いる。JAX 実装の精読結果は `references/JAX_NOTES.md` を参照。
 
 ## Rev. 履歴
+
+### Rev.4.6 (2026-05、M6.A 検証基盤完了)
+
+- **M6.A (validation infrastructure expansion) 全体完了**。M6.A.0
+  から M6.A.9 まで（中間の A.2.1 / A.4.5 / A.10 / A.11 を含む）。
+  A.0-A.8 + CLAUDE.md 測定プロトコル commit までの SHA は
+  BENCH.md §13 sub-step inventory 表に列挙。A.9 commit の SHA は
+  本ファイルがその commit に含まれるため `git log --grep 'M6.A.9'`
+  で参照可能。残 1 タスク (M6.A.7.1, task #132) は backlog として
+  M6.C-1 着手前に再評価
+- **M6.A の主要成果**:
+  - **5-layer 数値回帰**: bit-equal CPU (m1_regression g32-g256) /
+    mass conservation (5 grids 32-512) / CPU-GPU C=1 short-horizon /
+    GPU pre-post snapshot (A.5) / creature-alive sanity (A.11)
+  - **perf regression**: ±5 % warn / ±20 % err、3-run median、A.6
+    re-anchored baselines（cold-boot vs warm-state drift を明文化）
+  - **WebGPU validation guard**: `FLOW_LENIA_VALIDATE=1` opt-in、
+    integration tests 17/46 をカバー（A.7.1 で lib unit tests へ拡張）
+  - **heap leak regression**: 10K-step CPU heap delta < 500 KB、
+    mid-loop sample で transient/leak 弁別
+- **M6.A で確定した重要な物理的観察**:
+  - **C=1 でも grid ≥ 64 で強カオス** (M6.A.4.5)。ε = 1e-6 摂動が
+    1 step で O(0.8) に飽和、GPU vs CPU rel が grid² 系で増幅。
+    chaos limit 内で tolerance を grid-tiered 設定
+  - **GPU bit-determinism は process / 日数を跨いで保持**（M6.A.5 / A.7
+    で 3 日跨ぎ同 byte 再現を確認）。snapshot regression が成立する基盤
+  - **Cold-boot vs warm-state perf 差 7-27 %** (M6.A.6)。M1 thermal
+    accumulation で同 session 連続 perf 測定は信頼できず、commit-to-
+    commit drift detection には typical-state baseline を anchor
+- **方法論的成果** (M6.B / M6.C / M5 で再利用):
+  - **Layered tolerance**: 数値比較は scenario ごとに budget を変える
+    (bit-equal / mass / GPU-CPU C=1 / GPU-snapshot / creature sanity)
+  - **Honest framing**: noise band 以下の改善は overclaim せず、
+    measurement と extrapolation を明示的に区別 (A.6/A.7/A.8 で実践)
+  - **Subagent review workflow**: scope-guardian + adversarial-reviewer
+    で pre/post-implementation の品質ゲート。A.7-A.9 で実用化
+  - **Paired-run measurement protocol** (`CLAUDE.md` 測定プロトコル
+    節): off/on 同 thermal state、quiesced host、N=3 median
+- **§8 M6 セクション**: M6.A = ✅ 完了、M6.B (文献調査) 着手準備、
+  M6.C (per-pass optimization / FFT 化) は M6.B 後着手
+- **M6.B / M6.C / M5 へ引き継ぐ未解決事項**:
+  - M6.A.7.1 (task #132): lib unit tests への validation 拡張
+    (M6.C で WGSL shader を書き換える前に処理推奨)
+  - GPU memory monitoring 自動化: 現状 Activity Monitor 手動、
+    M6.A スコープ外（将来の M6.C/M5 で必要性再評価）
+  - FFT 設計詳細: BENCH §1/§2 の per-pass 占有率 (convolve 97.4 %)
+    を踏まえ M6.B 文献調査 → M6.C で実装計画
 
 ### Rev.4.5 (2026-05、M4 全体完了)
 
@@ -912,6 +959,21 @@ Cloudflare Pages にデプロイ。
 - M4.6 (`59943b8`): SidePanel polish + 残存日本語英語化
 
 ### M6: 性能チューニング (Rev.4.2 で M5 の前に前倒し)
+
+**進捗** (Rev.4.6 更新):
+- ✅ M6.A 検証基盤 (validation infrastructure): A.0-A.9 完了、
+  origin/main 7b71816。詳細は BENCH.md §5-§13 / Rev.4.6 ヘッダー
+- 🔜 M6.B 文献調査: WGSL FFT 実装方式 (具体的アルゴリズム / GPU
+  primitives 利用 / 参照実装は M6.B で決定)。1 週間想定。
+  実装ターゲットの algorithm 名は本書 §8 M6 optional stretch (Rev.4
+  既述) で "Stockham カーネル × 2 軸、複素 f32" と仮置きされており、
+  M6.B 文献調査の結果次第で変更される可能性あり
+- 🔜 M6.C per-pass optimization: convolve FFT 化が最重要 (BENCH §2
+  per-pass 97.4 % 占有)。bind-group caching は M6.0 §3 audit で既に
+  optimal 確認済のため scope 外
+- 🔜 M6.D Stage 1 中間評価: 256×256 / 4 creature / 60 FPS の見通し
+  を判定、撤退ライン (256×256×3×4 で 30 FPS なら成果) を確認
+- 🔜 M6.E 最終評価 + ドキュメント
 
 **成果物**:
 - 256×256 / C=3 / |K|=45 で 60 FPS 達成 (Apple M1 想定)
