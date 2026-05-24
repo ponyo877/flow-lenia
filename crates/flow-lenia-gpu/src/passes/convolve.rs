@@ -248,9 +248,8 @@ mod tests {
     use rand_chacha::ChaCha8Rng;
     use std::time::Instant;
 
-    fn headless_ctx() -> GpuContext {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        GpuContext::new_blocking(instance, None)
+    fn headless_ctx() -> (GpuContext, Option<crate::validation::ValidationGuard>) {
+        crate::validation::test_ctx_for_lib()
     }
 
     /// Helper: build a random activation field with deterministic values.
@@ -373,7 +372,7 @@ mod tests {
     /// correctness does not depend on those numbers.
     #[test]
     fn convolve_pass_matches_cpu_reference() {
-        let ctx = headless_ctx();
+        let (ctx, guard) = headless_ctx();
         let pass = ConvolvePass::new(&ctx);
 
         let labelled_cases: &[(&str, CaseParams)] = &[
@@ -419,6 +418,10 @@ mod tests {
                  gpu={gpu_ms:.2}ms  cpu={cpu_ms:.2}ms"
             );
             assert!(max_rel < 1e-4, "{name} max_rel = {max_rel:.3e} (>= 1e-4)");
+        }
+
+        if let Some(g) = &guard {
+            g.assert_no_errors();
         }
     }
 }

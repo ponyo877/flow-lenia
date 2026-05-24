@@ -243,9 +243,8 @@ mod tests {
     use rand_chacha::ChaCha8Rng;
     use std::time::Instant;
 
-    fn headless_ctx() -> GpuContext {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        GpuContext::new_blocking(instance, None)
+    fn headless_ctx() -> (GpuContext, Option<crate::validation::ValidationGuard>) {
+        crate::validation::test_ctx_for_lib()
     }
 
     /// Round-trip: upload a deterministically-sampled kernel bank,
@@ -256,7 +255,7 @@ mod tests {
     /// "values match" and "padding is correct".
     #[test]
     fn upload_then_readback_is_bit_equal() {
-        let ctx = headless_ctx();
+        let (ctx, guard) = headless_ctx();
 
         // Small bank so the test runs fast without skimping on the
         // mixed-radius coverage. `num_kernels=6` exercises padding for
@@ -332,6 +331,10 @@ mod tests {
             })
             .collect();
         assert_eq!(cpu_meta, gpu_meta);
+
+        if let Some(g) = &guard {
+            g.assert_no_errors();
+        }
     }
 
     /// `GpuKernelMeta` layout pin: keeps the M2.3 WGSL struct layout
@@ -347,7 +350,7 @@ mod tests {
     /// kernel shares the same radius (no padding needed).
     #[test]
     fn upload_constant_radius_has_no_padding() {
-        let ctx = headless_ctx();
+        let (ctx, guard) = headless_ctx();
         let entry = KernelEntry {
             c0: 0,
             c1: 0,
@@ -377,6 +380,10 @@ mod tests {
                 let dst = k * stride + i;
                 assert_eq!(v.to_bits(), gpu[dst].to_bits());
             }
+        }
+
+        if let Some(g) = &guard {
+            g.assert_no_errors();
         }
     }
 }

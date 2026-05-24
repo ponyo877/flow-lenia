@@ -427,9 +427,8 @@ mod tests {
         FlowLeniaSimulator,
     };
 
-    fn headless_ctx() -> GpuContext {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        GpuContext::new_blocking(instance, None)
+    fn headless_ctx() -> (GpuContext, Option<crate::validation::ValidationGuard>) {
+        crate::validation::test_ctx_for_lib()
     }
 
     fn small_cfg(channels: u32, paper_strict: bool, border: BorderMode) -> FlowLeniaConfig {
@@ -452,6 +451,11 @@ mod tests {
     /// Build CPU simulator and GPU pipeline from the same `(cfg, seed)`,
     /// run them for `n` steps, and compare per-cell with the requested
     /// tolerance.
+    /// M6.C-0: ValidationGuard assertion is performed inside this
+    /// helper rather than the 4 callers (gpu_pipeline_swap /
+    /// _ten_steps / _paper_strict / _wall_border), since the helper
+    /// owns the GpuContext lifetime and callers would otherwise
+    /// duplicate the guard machinery.
     fn compare_run(
         cfg: &FlowLeniaConfig,
         seed: u64,
@@ -459,7 +463,7 @@ mod tests {
         rel_tol: f32,
         abs_tol: f32,
     ) -> (f32, f32) {
-        let ctx = headless_ctx();
+        let (ctx, guard) = headless_ctx();
         let mut cpu_sim = FlowLeniaSimulator::new(*cfg, seed);
         let initial_a = cpu_sim.activation().clone();
         let kernel_params = cpu_sim.kernel_params().clone();
@@ -486,6 +490,11 @@ mod tests {
             );
         }
         let _ = (h, w, c);
+
+        if let Some(g) = &guard {
+            g.assert_no_errors();
+        }
+
         (max_abs, max_rel)
     }
 

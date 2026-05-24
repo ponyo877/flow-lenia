@@ -2,7 +2,7 @@
 //! `C = 3 / K = 10 / 100 step` CPU vs GPU field divergence is true
 //! chaotic dynamics or hides a latent implementation bug.
 //!
-//! All three tests are `#[ignore]`'d so normal `cargo test` skips them;
+//! 5 of the 6 tests are `#[ignore]`'d so normal `cargo test` skips them;
 //! run with:
 //!
 //! ```text
@@ -14,12 +14,14 @@
 //! growth rates themselves, the human reads the numbers and decides
 //! the interpretation.
 
+mod common;
+
 use flow_lenia_core::{
     config::{BorderMode, FlowLeniaConfig, MixRule},
     state::ActivationField,
     FlowLeniaSimulator,
 };
-use flow_lenia_gpu::{GpuContext, GpuStepPipeline};
+use flow_lenia_gpu::GpuStepPipeline;
 use ndarray::Array3;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -60,10 +62,11 @@ fn field_diff(a: &ActivationField, b: &ActivationField) -> (f32, f32) {
     (max_abs, max_rel)
 }
 
-fn headless_ctx() -> GpuContext {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-    GpuContext::new_blocking(instance, None)
-}
+// M6.C-0: GPU context construction goes through `common::test_ctx()`,
+// which optionally installs a `ValidationGuard` when
+// `FLOW_LENIA_VALIDATE=1` (same pattern as the other integration
+// tests). The local `headless_ctx` shim that previously duplicated
+// `wgpu::Instance::new` + `GpuContext::new_blocking` is removed.
 
 // ─────────────────────────────────────────────────────────────────────
 // Experiment 1: step-by-step CPU vs GPU divergence growth.
@@ -86,7 +89,7 @@ fn diagnose_c3_divergence_growth() {
     let initial_a = cpu_sim_init.activation().clone();
     let kernel_params = cpu_sim_init.kernel_params().clone();
 
-    let ctx = headless_ctx();
+    let (ctx, guard) = common::test_ctx();
     let mut cpu_sim = FlowLeniaSimulator::new(cfg, SEED);
     let mut gpu_pipeline = GpuStepPipeline::new(&ctx, &cfg, &kernel_params, &initial_a);
 
@@ -117,6 +120,10 @@ fn diagnose_c3_divergence_growth() {
             target_step, max_abs, max_rel, log_rel, log_ratio
         );
         prev_log = log_rel;
+    }
+
+    if let Some(g) = &guard {
+        g.assert_no_errors();
     }
 }
 
@@ -210,7 +217,7 @@ fn c3_divergence_at_10_steps() {
     let initial_a = cpu_sim.activation().clone();
     let kernel_params = cpu_sim.kernel_params().clone();
 
-    let ctx = headless_ctx();
+    let (ctx, guard) = common::test_ctx();
     let mut gpu_pipeline = GpuStepPipeline::new(&ctx, &cfg, &kernel_params, &initial_a);
 
     let n: u32 = 10;
@@ -228,6 +235,10 @@ fn c3_divergence_at_10_steps() {
     // Sanity: 10-step max_abs must be < 1 — otherwise the dynamics has
     // already saturated and the "chaotic" interpretation is moot.
     assert!(max_abs < 1.0, "10-step max_abs {max_abs} already saturated");
+
+    if let Some(g) = &guard {
+        g.assert_no_errors();
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -254,7 +265,7 @@ fn c3_divergence_at_10_steps() {
 #[test]
 #[ignore = "M6.A.4.5 diagnostic — per-step rel growth across grids"]
 fn m6a45_per_step_rel_growth_by_grid_c1() {
-    let ctx = headless_ctx();
+    let (ctx, guard) = common::test_ctx();
     let grids: &[u32] = &[32, 64, 128, 256];
     let n_steps: u32 = 10;
 
@@ -313,6 +324,10 @@ fn m6a45_per_step_rel_growth_by_grid_c1() {
             );
         }
         eprintln!();
+    }
+
+    if let Some(g) = &guard {
+        g.assert_no_errors();
     }
 }
 
@@ -410,7 +425,7 @@ fn m6a45_cpu_lyapunov_by_grid_c1() {
 #[test]
 #[ignore = "M6.A.4.5 diagnostic — chaos non-determinism at g256 C=1"]
 fn m6a45_chaos_nondeterminism_g256_c1() {
-    let ctx = headless_ctx();
+    let (ctx, guard) = common::test_ctx();
     let n_runs: usize = 5;
 
     let cfg = FlowLeniaConfig {
@@ -466,6 +481,10 @@ fn m6a45_chaos_nondeterminism_g256_c1() {
     eprintln!("  std    = {std:.6e}");
     eprintln!("  max/min ratio = {ratio:.4}x");
     eprintln!();
+
+    if let Some(g) = &guard {
+        g.assert_no_errors();
+    }
 }
 
 // `Array3` is referenced via the type alias `ActivationField`; this

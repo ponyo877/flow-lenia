@@ -13,8 +13,9 @@
   A.0-A.8 + CLAUDE.md 測定プロトコル commit までの SHA は
   BENCH.md §13 sub-step inventory 表に列挙。A.9 commit の SHA は
   本ファイルがその commit に含まれるため `git log --grep 'M6.A.9'`
-  で参照可能。残 1 タスク (M6.A.7.1, task #132) は backlog として
-  M6.C-1 着手前に再評価
+  で参照可能。**M6.A.7.1 backlog (task #132) は M6.C-0** (post-M6.B、
+  pre-M6.C-1 milestone) **で完了**: ValidationGuard 適用範囲が lib unit
+  tests 21 + diagnose_divergence 4 にも拡張、coverage 43/47
 - **M6.A の主要成果**:
   - **5-layer 数値回帰**: bit-equal CPU (m1_regression g32-g256) /
     mass conservation (5 grids 32-512) / CPU-GPU C=1 short-horizon /
@@ -22,7 +23,9 @@
   - **perf regression**: ±5 % warn / ±20 % err、3-run median、A.6
     re-anchored baselines（cold-boot vs warm-state drift を明文化）
   - **WebGPU validation guard**: `FLOW_LENIA_VALIDATE=1` opt-in、
-    integration tests 17/46 をカバー（A.7.1 で lib unit tests へ拡張）
+    M6.A.7 で integration tests 17/46 をカバー、**M6.C-0 で 43/47**
+    へ拡張済 (lib unit tests 21 + diagnose_divergence 4 追加、BENCH §10
+    参照、4 件の CPU-only test は wgpu surface 不在で N/A)
   - **heap leak regression**: 10K-step CPU heap delta < 500 KB、
     mid-loop sample で transient/leak 弁別
 - **M6.A で確定した重要な物理的観察**:
@@ -46,8 +49,8 @@
 - **§8 M6 セクション**: M6.A = ✅ 完了、M6.B (文献調査) 着手準備、
   M6.C (per-pass optimization / FFT 化) は M6.B 後着手
 - **M6.B / M6.C / M5 へ引き継ぐ未解決事項**:
-  - M6.A.7.1 (task #132): lib unit tests への validation 拡張
-    (M6.C で WGSL shader を書き換える前に処理推奨)
+  - ~~M6.A.7.1 (task #132): lib unit tests への validation 拡張~~
+    **→ M6.C-0 で完了** (post-M6.B、pre-M6.C-1 milestone)
   - GPU memory monitoring 自動化: 現状 Activity Monitor 手動、
     M6.A スコープ外（将来の M6.C/M5 で必要性再評価）
   - FFT 設計詳細: BENCH §1/§2 の per-pass 占有率 (convolve 97.4 %)

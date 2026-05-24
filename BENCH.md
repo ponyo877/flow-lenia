@@ -488,29 +488,36 @@ What is verifiable:
 
 ### Coverage scope
 
-`FLOW_LENIA_VALIDATE=1` covers **17 of 46** tests reported by
+**Updated by M6.C-0** (= task #132 / M6.A.7.1 backlog completion).
+`FLOW_LENIA_VALIDATE=1` now covers **43 of 47** tests reported by
 `cargo test -p flow-lenia-gpu`. Per binary:
 
-| binary | tests | reaches `test_ctx()` |
+| binary | tests | reaches a validation guard |
 |---|---:|:---:|
-| `gpu_snapshot_regression` | 4 | ✓ |
-| `m1_regression_gpu` | 8 | ✓ |
-| `perf_regression` | 1 | ✓ |
+| `gpu_snapshot_regression` | 4 | ✓ (`common::test_ctx`) |
+| `m1_regression_gpu` | 8 | ✓ (`common::test_ctx`) |
+| `perf_regression` | 1 | ✓ (`common::test_ctx`) |
 | `validation_smoke` | 1 | always-on (built-in guard) |
-| `visualize_test` | 3 | ✓ |
-| `diagnose_divergence` | 6 | ✗ (local `headless_ctx`) |
-| lib unit tests (`src/passes/*`, `pipeline.rs`) | 23 | ✗ (per-module `headless_ctx`) |
-| **total covered** | **17** | |
-| **total uncovered** | **29** | |
+| `visualize_test` | 3 | ✓ (`common::test_ctx`) |
+| `heap_regression` | 1 | ✓ (`common::test_ctx`, since M6.A.8) |
+| `diagnose_divergence` | 6 | 4 ✓ (`common::test_ctx`) / 2 CPU-only (no GPU surface) |
+| lib unit tests (`src/passes/*`, `pipeline.rs`, `kernel_buffers.rs`, `activation_buffer.rs`) | 23 | 21 ✓ (`validation::test_ctx_for_lib`) / 2 CPU-only (`gpu_kernel_meta_layout` size_of/align_of; `activation_buffer::flatten_unflatten_round_trip` pure CPU) |
+| **total covered** | **43** | (every test that touches `wgpu::Device`) |
+| **CPU-only (validation N/A)** | **4** | |
 
-The uncovered 29 are precisely the per-pass WGSL surface M6.C will
-rewrite (`convolve`, `affinity_growth`, `gradient`, `flow`,
-`reintegrate`) plus the diagnostic tests, so the gap is material.
-Logged as **M6.A.7.1 follow-up** (task #132): lift `test_ctx` into
-a module reachable from both trees, or wrap each local
-`headless_ctx` with the same env-var check; migrate
-`diagnose_divergence.rs` to `mod common; common::test_ctx()` at
-the same time.
+The previously-uncovered 29 (= 23 lib + 6 diagnose) were the per-pass
+WGSL surface M6.C will rewrite — that gap is now closed. The 4
+CPU-only tests exercise layout / flatten arithmetic with no
+`wgpu::Device` use, so there is nothing for the validation callback
+to surface.
+
+**Helper architecture** (post M6.C-0): the integration-test side
+uses `tests/common/mod.rs::test_ctx()`; the lib-unit-test side uses
+`flow-lenia-gpu/src/validation.rs::test_ctx_for_lib()` (the
+`#[cfg(test)] pub(crate)` counterpart). Both helpers share the same
+8-line body intentionally — see `test_ctx_for_lib` rustdoc for the
+decision rationale (single-source consolidation deferred until a
+third consumer appears, per the `flow-lenia-testkit` note below).
 
 ### Interpretation (with the scope caveat above)
 
@@ -559,8 +566,13 @@ flow-lenia-gpu is validation-clean. A future M6.C shader change
 that trips the guard will surface immediately at the integration
 test where the bad command is issued, with the wgpu `Debug` chain
 (message + source location) in the panic output via
-`ValidationGuard::assert_no_errors`. Lib unit tests that touch the
-same shaders are *not* yet covered — see the M6.A.7.1 follow-up.
+`ValidationGuard::assert_no_errors`. **As of M6.C-0**, the lib-unit-
+test surface (21 of 23 tests; 2 are CPU-only) plus
+`diagnose_divergence` (4 of 6 tests; 2 are CPU-only) are also
+covered — a validation error in WGSL rewritten under M6.C-1+ will
+now surface at the closest lib unit test (e.g.
+`src/passes/convolve.rs::tests`) rather than only at
+`m1_regression_gpu`, one step removed.
 
 ### Resolved footgun
 
@@ -808,11 +820,11 @@ for the anchor mapping.
 
 Backlog (logged but deferred past M6.A close):
 
-- **M6.A.7.1** (task #132): extend `ValidationGuard` coverage to
+- **M6.A.7.1** (task #132): ~~extend `ValidationGuard` coverage to
   the 23 lib unit tests in `src/passes/*` + `src/pipeline.rs` and
-  to `tests/diagnose_divergence.rs`. Recommended pickup point:
-  before M6.C-1, because the lib unit tests are the closest
-  test-side surface to the WGSL shaders M6.C will rewrite.
+  to `tests/diagnose_divergence.rs`~~ — **completed in M6.C-0**
+  (post-M6.B, pre-M6.C-1 milestone). Coverage now 43 of 47;
+  see §10 Coverage scope above.
 
 ### Key empirical findings
 
@@ -843,8 +855,10 @@ Backlog (logged but deferred past M6.A close):
    GPU sps is 17-35 %, while CPU sps drifts only 10-12 % between
    the same paired runs; that ratio cannot be attributed to
    validation alone without a thermally-controlled rig. Treat as
-   "not measured" for grids ≥ 128, not as "free". Coverage is
-   integration-test-only (17/46); lib unit tests deferred to A.7.1.
+   "not measured" for grids ≥ 128, not as "free". Coverage as of
+   M6.C-0 is **43 of 47** (4 tests are CPU-only and have no GPU
+   surface to validate); see §10 Coverage scope for the per-binary
+   breakdown.
 5. **Steady-state Rust allocation in the GPU step path is grid-
    independent** (Section 11). 10 K steps at 64×64 / C=3 leave
    `current` flat after step 5 K; peak's +1.1 MB transient settles
@@ -896,14 +910,13 @@ canonical text; this list is the index.
   commit (M6.B preparation, not part of M6.A.9).
 
 **For M6.C per-pass optimization** (after M6.B):
-- **Strongly recommended pre-condition**: complete M6.A.7.1 (task
-  #132) so lib unit tests also catch validation errors when the
-  WGSL is rewritten. Reasoning: the lib unit tests (`src/passes/*`)
-  are the closest surface to the WGSL changes M6.C will introduce,
-  and a validation error caught in `src/passes/convolve.rs::tests`
-  points at the exact pass; one caught only in
-  `m1_regression_gpu` is one step removed. Not a hard blocker if
-  M6.C lands first — just expect more diagnostic friction.
+- **Pre-condition completed in M6.C-0** (post-M6.B, pre-M6.C-1):
+  M6.A.7.1 lib-unit-test + diagnose_divergence validation coverage
+  extension landed. A validation error in WGSL rewritten under
+  M6.C-1+ now surfaces at the closest lib unit test
+  (`src/passes/convolve.rs::tests` etc.) instead of only at
+  `m1_regression_gpu`. See §10 Coverage scope (updated table) for
+  the 43 / 47 breakdown.
 - Each M6.C-N sub-step must pass `m1_regression_g*` (CPU bit-
   equal), `mass_conservation_g*` (5-layer), `gpu_field_regression_g*`
   (A.4.5 tiered), `gpu_snapshot_regression` (A.5 pre/post), and

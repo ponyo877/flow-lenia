@@ -105,3 +105,52 @@ impl ValidationGuard {
             .clone()
     }
 }
+
+/// M6.C-0 — lib-unit-test counterpart of
+/// `flow-lenia-gpu/tests/common/mod.rs`'s `test_ctx()`. Both helpers
+/// share the same shape (`(GpuContext, Option<ValidationGuard>)`
+/// gated on `FLOW_LENIA_VALIDATE`) but live in separate places: this
+/// one is `#[cfg(test)] pub(crate)` so the 7 src-side `#[cfg(test)]
+/// mod tests` blocks can construct a validating context without
+/// re-importing the integration-test `common` module (Rust forbids
+/// cross-binary test-helper sharing without exposing helpers in the
+/// production crate signature).
+///
+/// **Intentional duplication, not oversight.** The 8-line body of
+/// `tests/common::test_ctx()` is verbatim the body below. Lifting
+/// both into a single source location would require either (a) a
+/// public-API symbol on the production crate (rejected — pollutes
+/// the production surface for a test-only concern) or (b) a separate
+/// `flow-lenia-testkit` dev-only crate (BENCH.md §10 "long-term
+/// option"; deferred until a third consumer appears). With only two
+/// consumers, the duplication cost is two `env::var` lookups; a
+/// future env-var rename touches both sites mechanically.
+///
+/// `#[cfg(test)]` guarantees zero footprint in production binaries
+/// (`flow-lenia-app`, `flow-lenia-web`); these are compiled without
+/// the test harness and therefore without this symbol. Production
+/// callers continue to construct `GpuContext::new_blocking` directly
+/// and never opt into validation — see CLAUDE.md "production code
+/// への validation 不適用".
+///
+/// Caller pattern, mirroring the integration-test helper:
+///
+/// ```ignore
+/// let (ctx, guard) = test_ctx_for_lib();
+/// // ... pipeline construction + dispatch + readback ...
+/// if let Some(g) = &guard {
+///     g.assert_no_errors();
+/// }
+/// ```
+#[cfg(test)]
+#[must_use]
+pub(crate) fn test_ctx_for_lib() -> (crate::GpuContext, Option<ValidationGuard>) {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let ctx = crate::GpuContext::new_blocking(instance, None);
+    let guard = if std::env::var("FLOW_LENIA_VALIDATE").is_ok() {
+        Some(ValidationGuard::new(&ctx.device))
+    } else {
+        None
+    };
+    (ctx, guard)
+}

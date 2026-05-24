@@ -349,9 +349,8 @@ mod tests {
     use rand_chacha::ChaCha8Rng;
     use std::time::Instant;
 
-    fn headless_ctx() -> GpuContext {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        GpuContext::new_blocking(instance, None)
+    fn headless_ctx() -> (GpuContext, Option<crate::validation::ValidationGuard>) {
+        crate::validation::test_ctx_for_lib()
     }
 
     /// Helper: run convolve + affinity_growth on the GPU, return
@@ -523,7 +522,7 @@ mod tests {
 
     #[test]
     fn affinity_growth_constant_matches_cpu() {
-        let ctx = headless_ctx();
+        let (ctx, guard) = headless_ctx();
         let conv_pass = ConvolvePass::new(&ctx);
         let ag_pass = AffinityGrowthPass::new(&ctx);
         let mut rng = ChaCha8Rng::seed_from_u64(0xAFF1_C042);
@@ -570,11 +569,15 @@ mod tests {
             "[M2.4-Eq3] 32×32 torus C=3 K=10 : max_abs={max_abs:.3e}  max_rel={max_rel:.3e}  \
              gpu={gpu_ms:.2}ms  cpu={cpu_ms:.2}ms"
         );
+
+        if let Some(g) = &guard {
+            g.assert_no_errors();
+        }
     }
 
     #[test]
     fn affinity_growth_localized_matches_cpu() {
-        let ctx = headless_ctx();
+        let (ctx, guard) = headless_ctx();
         let conv_pass = ConvolvePass::new(&ctx);
         let ag_pass = AffinityGrowthPass::new(&ctx);
         let mut rng = ChaCha8Rng::seed_from_u64(0xAFF1_C043);
@@ -625,6 +628,10 @@ mod tests {
             "[M2.4-Eq7] 32×32 torus C=3 K=10 : max_abs={max_abs:.3e}  max_rel={max_rel:.3e}  \
              gpu={gpu_ms:.2}ms  cpu={cpu_ms:.2}ms"
         );
+
+        if let Some(g) = &guard {
+            g.assert_no_errors();
+        }
     }
 
     /// Locks the Eq. 3 ⊂ Eq. 7 specialisation: setting
@@ -633,7 +640,7 @@ mod tests {
     /// the same order, so f32 ordering matches exactly).
     #[test]
     fn affinity_growth_localized_with_uniform_p_equals_constant() {
-        let ctx = headless_ctx();
+        let (ctx, guard) = headless_ctx();
         let conv_pass = ConvolvePass::new(&ctx);
         let ag_pass = AffinityGrowthPass::new(&ctx);
         let mut rng = ChaCha8Rng::seed_from_u64(0xAFF1_C044);
@@ -676,6 +683,10 @@ mod tests {
                 b.to_bits(),
                 "divergence at index {i}: constant={a} localized={b}"
             );
+        }
+
+        if let Some(g) = &guard {
+            g.assert_no_errors();
         }
     }
 }

@@ -487,8 +487,11 @@ scope-guardian 確認の通り、優先順位 + 期待 speedup 根拠まで。WG
 
 ### §8.0 着手前提条件
 
-- **task #132 (M6.A.7.1, ValidationGuard lib unit tests 拡張)** を完了する
-  ことを M6.C-1 着手プロンプトで reminder として呼び出す (M6.A.9 確定事項)
+- ~~**task #132 (M6.A.7.1, ValidationGuard lib unit tests 拡張)** を完了する
+  ことを M6.C-1 着手プロンプトで reminder として呼び出す (M6.A.9 確定事項)~~
+  **→ M6.C-0 で完了済み** (post-M6.B, pre-M6.C-1 milestone)。Coverage 17/46
+  → 43/47 に拡張、BENCH §10 / DESIGN Rev.4.6 参照。M6.C-1 着手時の追加
+  reminder は不要
 - M6.A.5 の 5-layer test strategy を M6.C-N 各サブステップで踏襲、特に Layer 3
   (CPU-GPU C=1 tiered tolerance 1e-4/5e-4/1e-3/2.5e-3) と Layer 4 (snapshot
   pre/post regression) を毎 commit で実行

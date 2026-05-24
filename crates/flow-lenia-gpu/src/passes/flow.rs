@@ -188,9 +188,8 @@ mod tests {
     use rand_chacha::ChaCha8Rng;
     use std::time::Instant;
 
-    fn headless_ctx() -> GpuContext {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        GpuContext::new_blocking(instance, None)
+    fn headless_ctx() -> (GpuContext, Option<crate::validation::ValidationGuard>) {
+        crate::validation::test_ctx_for_lib()
     }
 
     fn make_random_activation(rng: &mut ChaCha8Rng, h: usize, w: usize, c: usize) -> Array3<f32> {
@@ -306,7 +305,7 @@ mod tests {
 
     #[test]
     fn flow_jax_compat_matches_cpu() {
-        let ctx = headless_ctx();
+        let (ctx, guard) = headless_ctx();
         let grad_pass = GradientPass::new(&ctx);
         let flow_pass = FlowPass::new(&ctx);
         let mut rng = ChaCha8Rng::seed_from_u64(0xF10F_C001);
@@ -326,11 +325,15 @@ mod tests {
             "[M2.6-jax]   32×32 torus C=3 : max_abs={max_abs:.3e}  max_rel={max_rel:.3e}  \
              gpu={gpu_ms:.2}ms  cpu={cpu_ms:.2}ms"
         );
+
+        if let Some(g) = &guard {
+            g.assert_no_errors();
+        }
     }
 
     #[test]
     fn flow_paper_strict_matches_cpu() {
-        let ctx = headless_ctx();
+        let (ctx, guard) = headless_ctx();
         let grad_pass = GradientPass::new(&ctx);
         let flow_pass = FlowPass::new(&ctx);
         let mut rng = ChaCha8Rng::seed_from_u64(0xF10F_C002);
@@ -350,6 +353,10 @@ mod tests {
             "[M2.6-paper] 32×32 torus C=3 : max_abs={max_abs:.3e}  max_rel={max_rel:.3e}  \
              gpu={gpu_ms:.2}ms  cpu={cpu_ms:.2}ms"
         );
+
+        if let Some(g) = &guard {
+            g.assert_no_errors();
+        }
     }
 
     /// With C=1 the two α formulas are mathematically equivalent
@@ -373,7 +380,7 @@ mod tests {
     /// upgrade.
     #[test]
     fn flow_paper_strict_equals_jax_compat_when_c_is_one() {
-        let ctx = headless_ctx();
+        let (ctx, guard) = headless_ctx();
         let grad_pass = GradientPass::new(&ctx);
         let flow_pass = FlowPass::new(&ctx);
         let mut rng = ChaCha8Rng::seed_from_u64(0xF10F_C003);
@@ -389,5 +396,9 @@ mod tests {
         eprintln!(
             "[M2.6-eq]    32×32 torus C=1 paper⇄jax : max_abs={max_abs:.3e}  max_rel={max_rel:.3e}"
         );
+
+        if let Some(g) = &guard {
+            g.assert_no_errors();
+        }
     }
 }

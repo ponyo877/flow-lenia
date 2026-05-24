@@ -182,9 +182,8 @@ mod tests {
     use rand_chacha::ChaCha8Rng;
     use std::time::Instant;
 
-    fn headless_ctx() -> GpuContext {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        GpuContext::new_blocking(instance, None)
+    fn headless_ctx() -> (GpuContext, Option<crate::validation::ValidationGuard>) {
+        crate::validation::test_ctx_for_lib()
     }
 
     fn cfg_torus(c: u32, sigma: f32, dt: f32, dd: u32, h: u32, w: u32) -> FlowLeniaConfig {
@@ -314,7 +313,7 @@ mod tests {
     /// should shift exactly one column to the right.
     #[test]
     fn reintegrate_uniform_translation_one_cell_right_torus() {
-        let ctx = headless_ctx();
+        let (ctx, guard) = headless_ctx();
         let pass = ReintegratePass::new(&ctx);
         let (h, w, c) = (16usize, 16usize, 1usize);
         let cfg = cfg_torus(c as u32, 0.3, 1.0, 5, h as u32, w as u32);
@@ -354,6 +353,10 @@ mod tests {
                 );
             }
         }
+
+        if let Some(g) = &guard {
+            g.assert_no_errors();
+        }
     }
 
     /// M1.11 reintegrate_uniform_translation_subcell ported.
@@ -361,7 +364,7 @@ mod tests {
     /// the source cell and the cell one to the right.
     #[test]
     fn reintegrate_uniform_translation_subcell_torus() {
-        let ctx = headless_ctx();
+        let (ctx, guard) = headless_ctx();
         let pass = ReintegratePass::new(&ctx);
         let (h, w, c) = (8usize, 8usize, 1usize);
         let cfg = cfg_torus(c as u32, 0.5, 1.0, 5, h as u32, w as u32);
@@ -394,13 +397,17 @@ mod tests {
             (v_right - 0.5).abs() < 1e-5,
             "right cell got {v_right}, expected 0.5"
         );
+
+        if let Some(g) = &guard {
+            g.assert_no_errors();
+        }
     }
 
     /// Random A + random F single-step: GPU vs CPU. Tests both
     /// `dd = 5` (default) and `dd = 7` (max UI slider).
     #[test]
     fn reintegrate_single_step_matches_cpu_dd5_and_dd7() {
-        let ctx = headless_ctx();
+        let (ctx, guard) = headless_ctx();
         let pass = ReintegratePass::new(&ctx);
         let (h, w, c) = (32usize, 32usize, 3usize);
         let mut rng = ChaCha8Rng::seed_from_u64(0xC011_DD57);
@@ -441,13 +448,22 @@ mod tests {
                  gpu={gpu_ms:.2}ms  cpu={cpu_ms:.2}ms"
             );
         }
+
+        if let Some(g) = &guard {
+            g.assert_no_errors();
+        }
     }
 
     /// 100-step GPU-only loop, random F (fresh per step) — analogous to
     /// M1.11's `reintegrate_mass_conservation_torus_c{1,3}`. We
     /// allocate two `A` buffers and ping-pong between them.
+    ///
+    /// M6.C-0: ValidationGuard assertion is performed inside the helper
+    /// rather than the callers, since the helper owns the GpuContext
+    /// lifetime and the 2 callers (C=1 / C=3 mass-conservation tests)
+    /// would otherwise need to duplicate the guard machinery.
     fn run_mass_conservation(channels: u32, seed: u64) -> (f64, f64, f64) {
-        let ctx = headless_ctx();
+        let (ctx, guard) = headless_ctx();
         let pass = ReintegratePass::new(&ctx);
         let (h, w) = (32usize, 32usize);
         let c = channels as usize;
@@ -530,6 +546,11 @@ mod tests {
         }
         let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
         let per_step_ms = elapsed_ms / f64::from(n_steps);
+
+        if let Some(g) = &guard {
+            g.assert_no_errors();
+        }
+
         (max_rel, elapsed_ms, per_step_ms)
     }
 

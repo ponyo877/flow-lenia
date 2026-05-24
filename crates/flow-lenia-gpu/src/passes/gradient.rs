@@ -272,9 +272,8 @@ mod tests {
     use rand_chacha::ChaCha8Rng;
     use std::time::Instant;
 
-    fn headless_ctx() -> GpuContext {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        GpuContext::new_blocking(instance, None)
+    fn headless_ctx() -> (GpuContext, Option<crate::validation::ValidationGuard>) {
+        crate::validation::test_ctx_for_lib()
     }
 
     fn make_random_activation(rng: &mut ChaCha8Rng, h: usize, w: usize, c: usize) -> Array3<f32> {
@@ -336,7 +335,7 @@ mod tests {
     /// We compare in (y, x, axis, c) order.
     #[test]
     fn gradient_u_matches_cpu_sobel_per_channel() {
-        let ctx = headless_ctx();
+        let (ctx, guard) = headless_ctx();
         let pass = GradientPass::new(&ctx);
         let mut rng = ChaCha8Rng::seed_from_u64(0x6_AD00_F0F0);
 
@@ -376,13 +375,17 @@ mod tests {
             "[M2.5-∇U]   32×32 torus C=3 : max_abs={max_abs:.3e}  max_rel={max_rel:.3e}  \
              gpu={gpu_ms:.2}ms  cpu={cpu_ms:.2}ms"
         );
+
+        if let Some(g) = &guard {
+            g.assert_no_errors();
+        }
     }
 
     /// ∇A_Σ: GPU `(H, W, 2)` flat vs CPU `Array3<f32>` `(H, W, 2)`.
     /// Same axis order; straightforward element-wise compare.
     #[test]
     fn gradient_a_sum_matches_cpu() {
-        let ctx = headless_ctx();
+        let (ctx, guard) = headless_ctx();
         let pass = GradientPass::new(&ctx);
         let mut rng = ChaCha8Rng::seed_from_u64(0x6_AD11_F0F1);
 
@@ -420,6 +423,10 @@ mod tests {
             "[M2.5-∇A_Σ] 32×32 torus C=3 : max_abs={max_abs:.3e}  max_rel={max_rel:.3e}  \
              gpu={gpu_ms:.2}ms  cpu={cpu_ms:.2}ms"
         );
+
+        if let Some(g) = &guard {
+            g.assert_no_errors();
+        }
     }
 
     /// A(x, y) = x: interior ∂x = +8 (M1.7 sobel_x_with_x_ramp). C=1
@@ -430,7 +437,7 @@ mod tests {
     /// boundary artifacts (M1.7 design).
     #[test]
     fn gradient_x_ramp_interior_partial_dx_is_eight() {
-        let ctx = headless_ctx();
+        let (ctx, guard) = headless_ctx();
         let pass = GradientPass::new(&ctx);
 
         let (h, w, c) = (8_usize, 8_usize, 1_usize);
@@ -470,6 +477,10 @@ mod tests {
                     "∇A_Σ[(y={y}, x={x}, ax=DX)] = {v_as}, expected 8.0"
                 );
             }
+        }
+
+        if let Some(g) = &guard {
+            g.assert_no_errors();
         }
     }
 }
