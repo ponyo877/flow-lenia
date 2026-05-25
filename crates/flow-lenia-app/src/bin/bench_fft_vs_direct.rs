@@ -60,17 +60,16 @@ use std::time::Instant;
 
 const SEED: u64 = 1729;
 const GRID: u32 = 64;
-const CHANNELS: u32 = 1;
 const NUM_KERNELS: u32 = 10;
 const N_STEPS: u32 = 100;
 const N_TRIALS: usize = 3;
 const GATE_RATIO: f64 = 2.0;
 
-fn cfg() -> FlowLeniaConfig {
+fn cfg_for_channels(channels: u32) -> FlowLeniaConfig {
     FlowLeniaConfig {
         grid_width: GRID,
         grid_height: GRID,
-        channels: CHANNELS,
+        channels,
         dt: 0.2,
         sigma: 0.65,
         n: 2.0,
@@ -83,8 +82,8 @@ fn cfg() -> FlowLeniaConfig {
     }
 }
 
-fn measure_trial(ctx: &GpuContext, mode: ConvolveMode) -> f64 {
-    let cfg = cfg();
+fn measure_trial(ctx: &GpuContext, channels: u32, mode: ConvolveMode) -> f64 {
+    let cfg = cfg_for_channels(channels);
     let cpu_init = FlowLeniaSimulator::new(cfg, SEED);
     let initial_a = cpu_init.activation().clone();
     let kernel_params = cpu_init.kernel_params().clone();
@@ -106,29 +105,20 @@ fn median(samples: &mut [f64]) -> f64 {
     samples[samples.len() / 2]
 }
 
-fn main() -> ExitCode {
-    eprintln!(
-        "M6.C-1-4-b bench_fft_vs_direct\n\
-         config: N={GRID}, C={CHANNELS}, K={NUM_KERNELS}, Torus, \
-         {N_STEPS} steps × {N_TRIALS} trials, paired D F D F D F\n\
-         gate: FFT must be ≥ {GATE_RATIO:.1}× faster than Direct"
-    );
-    eprintln!("---");
-
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-    let ctx = GpuContext::new_blocking(instance, None);
-
+/// Run a paired D F D F D F measurement for one channel count and
+/// return (ratio, gate_pass).
+fn measure_channels(ctx: &GpuContext, channels: u32) -> (f64, bool) {
     let mut direct_samples: Vec<f64> = Vec::with_capacity(N_TRIALS);
     let mut fft_samples: Vec<f64> = Vec::with_capacity(N_TRIALS);
 
-    // Paired interleave: D F D F D F.
+    eprintln!("\n=== C={channels} paired-run D F D F D F ===");
     for trial in 0..N_TRIALS {
-        let d_ms = measure_trial(&ctx, ConvolveMode::Direct);
+        let d_ms = measure_trial(ctx, channels, ConvolveMode::Direct);
         direct_samples.push(d_ms);
-        let f_ms = measure_trial(&ctx, ConvolveMode::Fft);
+        let f_ms = measure_trial(ctx, channels, ConvolveMode::Fft);
         fft_samples.push(f_ms);
         eprintln!(
-            "trial {trial}: direct={d_ms:.3} ms/step  fft={f_ms:.3} ms/step  \
+            "  trial {trial}: direct={d_ms:.3} ms/step  fft={f_ms:.3} ms/step  \
              ratio={ratio:.3}×",
             ratio = d_ms / f_ms
         );
@@ -146,44 +136,59 @@ fn main() -> ExitCode {
     let fft_median = median(&mut fft_samples.clone());
     let ratio = direct_median / fft_median;
 
-    eprintln!("---");
-    // Round 1 review S-4: print (min, median, max) so future re-runs
-    // can spot envelope drift across trials.
     eprintln!(
-        "direct: median {direct_median:.3} ms/step  (min {direct_min:.3}, max {direct_max:.3}, \
+        "  direct: median {direct_median:.3} ms/step  (min {direct_min:.3}, max {direct_max:.3}, \
          range {range:.3} ms = {pct:.2}% of median)",
         range = direct_max - direct_min,
         pct = 100.0 * (direct_max - direct_min) / direct_median
     );
     eprintln!(
-        "fft   : median {fft_median:.3} ms/step  (min {fft_min:.3}, max {fft_max:.3}, \
+        "  fft   : median {fft_median:.3} ms/step  (min {fft_min:.3}, max {fft_max:.3}, \
          range {range:.3} ms = {pct:.2}% of median)",
         range = fft_max - fft_min,
         pct = 100.0 * (fft_max - fft_min) / fft_median
     );
     eprintln!(
-        "sps  : direct {direct_sps:.1}  fft {fft_sps:.1}",
+        "  sps  : direct {direct_sps:.1}  fft {fft_sps:.1}",
         direct_sps = 1000.0 / direct_median,
         fft_sps = 1000.0 / fft_median
     );
-    eprintln!("ratio (FFT vs Direct speedup) = {ratio:.3}×");
-
-    // Honest framing: thermal noise band per BENCH §9 / CLAUDE.md §5
-    // can be 7-27 %. If the result is within ±10 % of 1×, that's
-    // "no measurable speedup at this measurement budget".
+    eprintln!("  ratio (FFT vs Direct speedup) = {ratio:.3}×");
     if (ratio - 1.0).abs() < 0.10 {
-        eprintln!("⚠ ratio is within ±10% of 1× — within thermal noise band, treat as 'no measurable difference'");
+        eprintln!("  ⚠ ratio within ±10% of 1× — thermal noise band");
     }
+    (ratio, ratio >= GATE_RATIO)
+}
 
-    eprintln!("---");
-    if ratio >= GATE_RATIO {
+fn main() -> ExitCode {
+    eprintln!(
+        "M6.C-1-5-b bench_fft_vs_direct (C=1 + C=3 multi-channel)\n\
+         config: N={GRID}, K={NUM_KERNELS}, Torus, {N_STEPS} steps × {N_TRIALS} trials\n\
+         gate: FFT must be ≥ {GATE_RATIO:.1}× faster than Direct (per channel count)"
+    );
+
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let ctx = GpuContext::new_blocking(instance, None);
+
+    // M6.C-1-5-b: measure both C=1 (existing C-1-4-b path) and C=3
+    // (Flow-Lenia default + new multi-channel FFT support from
+    // C-1-5-a). The early-exit gate checks each independently —
+    // both must pass ≥ 2× for auto-commit.
+    let (ratio_c1, pass_c1) = measure_channels(&ctx, 1);
+    let (ratio_c3, pass_c3) = measure_channels(&ctx, 3);
+
+    eprintln!("\n=== Summary ===");
+    eprintln!("C=1 ratio = {ratio_c1:.3}×  gate {}", if pass_c1 { "PASS" } else { "FAIL" });
+    eprintln!("C=3 ratio = {ratio_c3:.3}×  gate {}", if pass_c3 { "PASS" } else { "FAIL" });
+
+    if pass_c1 && pass_c3 {
         eprintln!(
-            "✓ GATE PASS: ratio {ratio:.3}× ≥ {GATE_RATIO:.1}× — auto-commit allowed"
+            "✓ GATE PASS (both channel counts ≥ {GATE_RATIO:.1}×) — auto-commit allowed"
         );
         ExitCode::from(0)
     } else {
         eprintln!(
-            "✗ EARLY EXIT GATE: ratio {ratio:.3}× < {GATE_RATIO:.1}× — \
+            "✗ EARLY EXIT GATE (at least one channel count < {GATE_RATIO:.1}×) — \
              Phase 3 改訂条件 2 trigger, Claude Web notification required \
              (do NOT auto-commit)"
         );

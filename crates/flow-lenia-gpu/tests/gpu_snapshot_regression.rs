@@ -186,7 +186,19 @@ fn run_gpu_at_case(case: &Case, n_steps: u32, ctx: &GpuContext) -> ActivationFie
     let initial_a = cpu_init.activation().clone();
     let kernel_params = cpu_init.kernel_params().clone();
 
-    let mut pipeline = GpuStepPipeline::new(ctx, &cfg, &kernel_params, &initial_a);
+    // M6.C-1-5-b: pin Direct mode here. The committed snapshot fixtures
+    // were captured against the direct convolution path (M6.A.5); the
+    // FFT path produces numerically-different results (M6.A.5 / C-1-3
+    // chaos-amplification finding) so the FFT-mode snapshot needs its
+    // own baseline. New baseline regeneration is the C-1-6 retro item;
+    // until then the direct path remains the canonical Layer-4 anchor.
+    let mut pipeline = GpuStepPipeline::new_with_mode(
+        ctx,
+        &cfg,
+        &kernel_params,
+        &initial_a,
+        flow_lenia_gpu::pipeline::ConvolveMode::Direct,
+    );
     pipeline.run_steps(ctx, n_steps);
     let a = pipeline.readback_activation(ctx);
 

@@ -43,25 +43,61 @@ use flow_lenia_core::{config::FlowLeniaConfig, params::KernelParams, state::Acti
 use wgpu::util::DeviceExt;
 
 /// Which convolution algorithm `GpuStepPipeline` uses per step.
-/// Default is `Direct` so existing callers (`flow-lenia-app`,
-/// `flow-lenia-web`, all M2.x / M4.x tests) are unaffected by the
-/// FFT-mode addition.
+/// Default is [`ConvolveMode::Auto`] (M6.C-1-5-b): pick `Fft` when
+/// the grid is in `SUPPORTED_N` (= {64, 256}) and `Direct` otherwise,
+/// so callers requesting grid 32 / 128 / 512 (mixed-radix sizes the
+/// FFT primitive does not yet handle) silently fall back to the
+/// direct path. This preserves existing test sweeps + UI grid
+/// options while making FFT the primary path for the supported
+/// grid sizes.
 ///
-/// **M6.C-1-4-b limitation**: `Fft` requires `cfg.channels == 1` and
-/// `cfg.grid_width` ∈ `SUPPORTED_N` (= {64, 256}). Multi-channel
-/// (cfg.channels > 1) support is C-1-5 candidate. Mixed-radix grid
-/// sizes (32, 128, 512) are out of scope per the FFT primitive's
-/// pure-radix-4 constraint.
+/// **M6.C-1-5-a status**: `Fft` supports `C >= 1` (per-kernel
+/// source-channel routing via `ConvolveFftPass::kernel_routing_buf`).
+/// Mixed-radix grid sizes (32, 128, 512) remain out of scope per
+/// the FFT primitive's pure-radix-4 constraint (M6.C-1-2
+/// scope-guardian deferred); the C-1-5-b auto-fallback keeps the
+/// direct path for those grids as a deprecation path rather than a
+/// regression.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
 pub enum ConvolveMode {
-    /// Existing M2.3 direct convolution pass — exact CPU bit-equal
-    /// fallback, supports all channels and all grid sizes.
-    #[default]
+    /// M2.3 direct convolution pass. **Deprecated as of C-1-5-b**:
+    /// kept as the `Auto` fall-back for grid sizes the FFT primitive
+    /// does not yet support (32 / 128 / 512). Will be removed once
+    /// the mixed-radix FFT lands (M6.C-1 後半 or M5).
     Direct,
-    /// FFT-based convolution via `ConvolveFftPass` (kernel pre-FFT
+    /// FFT-based convolution via [`ConvolveFftPass`] (kernel pre-FFT
     /// + spectral multiply + per-kernel inverse FFT + layout
-    /// transpose). C=1 only, grid ∈ {64, 256} only.
+    /// transpose). C >= 1 with per-kernel `source_channel` routing
+    /// (C-1-5-a). Grid must be in `SUPPORTED_N` = {64, 256}.
     Fft,
+    /// **Default** (M6.C-1-5-b): pick `Fft` if the grid is in
+    /// `SUPPORTED_N`, else fall back to `Direct`. The actual choice
+    /// is resolved at `new_with_mode()` time by
+    /// [`ConvolveMode::resolve`], so the runtime field always holds
+    /// `Direct` or `Fft` (never `Auto`).
+    #[default]
+    Auto,
+}
+
+impl ConvolveMode {
+    /// Auto-fallback resolution: `Auto` collapses to `Fft` when
+    /// `grid` is in `SUPPORTED_N`, else `Direct`. Explicit
+    /// `Direct` / `Fft` are passed through. Callers that explicitly
+    /// pick `Fft` for an unsupported grid will hit the FFT-side
+    /// assertion at `ConvolveFftPass::new` — that path is intentional.
+    #[must_use]
+    pub fn resolve(self, grid: u32) -> ConvolveMode {
+        match self {
+            ConvolveMode::Auto => {
+                if is_supported_n(grid) {
+                    ConvolveMode::Fft
+                } else {
+                    ConvolveMode::Direct
+                }
+            }
+            other => other,
+        }
+    }
 }
 
 /// One full Flow-Lenia step on the GPU. Owns every buffer and bind
@@ -128,10 +164,12 @@ impl GpuStepPipeline {
     /// `cfg` and `kernel_params` must agree on `num_kernels` and
     /// `channels` (asserted). `initial_a` must match `cfg`'s grid
     /// shape.
-    /// Backward-compatible constructor: defaults to
-    /// [`ConvolveMode::Direct`] so all existing callers
-    /// (`flow-lenia-app`, `flow-lenia-web`, M2.x / M4.x tests) keep
-    /// their pre-M6.C-1-4 behaviour byte-for-byte.
+    /// Default constructor: uses [`ConvolveMode::Auto`] which picks
+    /// `Fft` for grid ∈ {64, 256} and `Direct` otherwise. M6.C-1-5-b
+    /// switched the default from `Direct` to `Auto` so the FFT path
+    /// becomes primary while preserving existing grid sweeps for the
+    /// mixed-radix sizes the FFT primitive does not yet handle
+    /// (C-1-2 scope-guardian deferred).
     #[must_use]
     pub fn new(
         ctx: &GpuContext,
@@ -139,7 +177,7 @@ impl GpuStepPipeline {
         kernel_params: &KernelParams,
         initial_a: &ActivationField,
     ) -> Self {
-        Self::new_with_mode(ctx, cfg, kernel_params, initial_a, ConvolveMode::Direct)
+        Self::new_with_mode(ctx, cfg, kernel_params, initial_a, ConvolveMode::Auto)
     }
 
     /// M6.C-1-4-b explicit-mode constructor. For `ConvolveMode::Fft`
@@ -158,6 +196,11 @@ impl GpuStepPipeline {
         initial_a: &ActivationField,
         convolve_mode: ConvolveMode,
     ) -> Self {
+        // M6.C-1-5-b auto-fallback: `Auto` resolves to `Fft` for
+        // supported grids, `Direct` otherwise. The stored field will
+        // be the resolved variant; tests can call
+        // `pipeline.convolve_mode()` to see what actually ran.
+        let convolve_mode = convolve_mode.resolve(cfg.grid_width);
         if convolve_mode == ConvolveMode::Fft {
             // M6.C-1-5-a: channels >= 1 now supported (per-kernel
             // source_channel routing via ConvolveFftPass kernel_routing_buf).
@@ -334,6 +377,8 @@ impl GpuStepPipeline {
                     precompute_kernel_ffts(ctx, kernel_params, n, &fft.fft2d, &fft.twiddles);
                 (Some(fft), Some(kfft))
             }
+            // Auto was resolved earlier in this function.
+            ConvolveMode::Auto => unreachable!("Auto resolved at function entry"),
         };
 
         Self {
@@ -463,6 +508,8 @@ impl GpuStepPipeline {
         match self.convolve_mode {
             ConvolveMode::Direct => self.record_step(&mut enc),
             ConvolveMode::Fft => self.record_step_fft(ctx, &mut enc),
+            // Auto is resolved at new_with_mode and can't appear here.
+            ConvolveMode::Auto => unreachable!("convolve_mode resolved at construction"),
         }
         ctx.queue.submit([enc.finish()]);
         self.swap_buffers();
@@ -490,6 +537,15 @@ impl GpuStepPipeline {
     /// the existing pipeline state and are intentionally ignored —
     /// changing those needs a full `GpuStepPipeline::new` (see M4.4
     /// "Apply" / "New Seed" paths in `flow-lenia-web`).
+    ///
+    /// **TODO (M6.C-1-5-b M1, M6.C-4 / M5)**: `kernel_routing_buf`
+    /// in `ConvolveFftPass` is built once from `kernel_params[k].c0`
+    /// in `new_with_mode` and is NOT refreshed by `update_globals`.
+    /// If a future UI exposes per-kernel `c0` painting (M5
+    /// parameter-painting candidate) the FFT path will silently use
+    /// stale routing. Reachable today only via a full pipeline
+    /// rebuild; flagged here so the next UI-side change includes a
+    /// rebuild trigger.
     pub fn update_globals(&self, ctx: &GpuContext, cfg: &FlowLeniaConfig) {
         let globals = GpuGlobals::new(
             self.height,

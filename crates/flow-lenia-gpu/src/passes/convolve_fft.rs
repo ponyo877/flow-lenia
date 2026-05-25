@@ -256,9 +256,16 @@ impl ConvolveFftPass {
             num_kernels >= 1,
             "ConvolveFftPass requires K >= 1 (got {num_kernels})"
         );
+        // M6.C-1-5-b S3 (Round 1 review): soft upper bound on C to
+        // catch obvious mistakes (e.g. swapped argument order) before
+        // they manifest as 24 MB+ scratch allocations. 16 is the
+        // ceiling M5 "4 creatures × 3 channels each" might plausibly
+        // reach; higher requires explicit re-tuning of buffer sizing
+        // and possibly the FFT primitive itself.
         assert!(
-            channels >= 1,
-            "ConvolveFftPass requires C >= 1 (got {channels})"
+            (1..=16).contains(&channels),
+            "ConvolveFftPass requires C ∈ [1, 16] (got {channels}); \
+             higher channel counts need scratch-buffer-sizing review."
         );
         let cells = (n * n) as usize;
         let k = num_kernels;
