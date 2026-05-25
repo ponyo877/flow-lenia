@@ -12,7 +12,9 @@ pub mod convolve;
 pub mod fft;
 pub mod flow;
 pub mod gradient;
+pub mod kernel_fft;
 pub mod reintegrate;
+pub mod spectral_multiply;
 pub mod visualize;
 
 pub use affinity_growth::{
@@ -24,6 +26,8 @@ pub use fft::{
     is_supported_n, precompute_twiddles_1d, Fft2dPass, FftAxis, FftDirection, FftParams, FftPass,
     SUPPORTED_N,
 };
+pub use kernel_fft::{build_padded_kernel, precompute_kernel_ffts, KernelFftBuffers};
+pub use spectral_multiply::{SpectralMultiplyParams, SpectralMultiplyPass};
 pub use flow::FlowPass;
 pub use gradient::GradientPass;
 pub use reintegrate::ReintegratePass;

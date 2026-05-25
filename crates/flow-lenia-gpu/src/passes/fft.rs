@@ -355,6 +355,105 @@ impl Fft2dPass {
             FftAxis::V => &self.v,
         }
     }
+
+    /// M6.C-1-3 standalone 2D forward FFT helper. Runs the two-axis
+    /// dispatch on a real `n × n` input and returns the complex
+    /// `n × n` spectrum as `Vec<[f32; 2]>` (.0 = real, .1 = imag).
+    ///
+    /// Allocates two scratch buffers per call — fine for the C-1-3
+    /// startup kernel pre-FFT path (one call per kernel) and for
+    /// integration tests. The per-step hot path that C-1-4 will wire
+    /// up should manage its own buffers and call into the
+    /// `axis(...) + record(...)` API directly to avoid the per-call
+    /// allocation. `TODO(M6.C-1-4)`: replace the per-call buffers
+    /// with caller-supplied scratch when integrating into the
+    /// convolution step.
+    ///
+    /// Round 1 review #4: the resize-copy + H/V dispatch are folded
+    /// into a single command encoder + a single submit (was two
+    /// submits in the initial commit — this saves K queue submits at
+    /// kernel-precompute startup).
+    #[must_use]
+    pub fn forward_2d(
+        &self,
+        ctx: &GpuContext,
+        twiddles: &wgpu::Buffer,
+        input_real: &[f32],
+    ) -> Vec<[f32; 2]> {
+        let n = self.n;
+        let total_cells = (n * n) as usize;
+        assert_eq!(
+            input_real.len(),
+            total_cells,
+            "Fft2dPass::forward_2d: input must be N×N reals (got {} for N={})",
+            input_real.len(),
+            n
+        );
+
+        // Staging: real input (N×N reals = 4N² bytes), only used as
+        // a COPY_SRC for the encoder-internal copy into buf_a below.
+        let staging = ctx
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("fft2d::forward_2d staging real"),
+                contents: bytemuck::cast_slice(input_real),
+                usage: wgpu::BufferUsages::COPY_SRC,
+            });
+        // buf_a: complex-sized (8N² bytes) — receives the H-axis
+        // shader's real-input read (which addresses the first 4N²
+        // bytes) and, after the V-axis pass, the complex spectrum.
+        let buf_a = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("fft2d::forward_2d buf_a (complex-sized)"),
+            size: (total_cells * 2 * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let buf_b = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("fft2d::forward_2d buf_b"),
+            size: (total_cells * 2 * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        let params_h = self
+            .h
+            .upload_params(ctx, FftParams::new(n, n, FftDirection::Forward));
+        let params_v = self
+            .v
+            .upload_params(ctx, FftParams::new(n, n, FftDirection::Forward));
+        let bg_h = self
+            .h
+            .make_bind_group(ctx, &buf_a, twiddles, &buf_b, &params_h);
+        let bg_v = self
+            .v
+            .make_bind_group(ctx, &buf_b, twiddles, &buf_a, &params_v);
+
+        // Single encoder = single submit: staging→buf_a copy, then
+        // H+V dispatch. wgpu inserts implicit barriers between the
+        // copy and the compute pass.
+        let mut enc = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("fft2d::forward_2d encoder"),
+            });
+        enc.copy_buffer_to_buffer(&staging, 0, &buf_a, 0, (total_cells * 4) as u64);
+        self.h.record(&mut enc, &bg_h, n);
+        self.v.record(&mut enc, &bg_v, n);
+        ctx.queue.submit([enc.finish()]);
+        ctx.device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .unwrap();
+
+        let flat = crate::readback::readback_buffer::<f32>(ctx, &buf_a, total_cells * 2);
+        flat.chunks_exact(2).map(|c| [c[0], c[1]]).collect()
+    }
 }
 
 /// Precompute the full N forward-FFT twiddle factors
