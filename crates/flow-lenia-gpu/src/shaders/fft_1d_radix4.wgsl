@@ -1,82 +1,75 @@
-// Flow-Lenia FFT primitive — M6.C-1-1.
+// Flow-Lenia FFT primitive — M6.C-1-1 (forward, N=256) → M6.C-1-2
+// (dynamic N ∈ {64, 256}, forward/inverse via direction flag, H axis).
 //
-// 1D complex Cooley-Tukey FFT, **radix-4 in-place DIT**, fixed
-// N = 256, **workgroup-memory tiled**: one workgroup processes one
-// row of 256 complex samples and runs all log₄(256) = 4 butterfly
-// stages inside a single dispatch, with `workgroupBarrier()` between
-// stages. This deliberately avoids the per-stage-dispatch pattern
-// (see WebTide ocean implementation analysed in `docs/M6_literature_
-// survey.md §2.3`); on Metal the per-dispatch API cost is 32-71 μs
-// (Maczan 2026, arXiv:2604.02344), so 4 stages × `num_rows` dispatches
-// per axis would eat the 60-FPS frame budget by itself.
+// 1D complex Cooley-Tukey FFT, **radix-4 in-place DIT**,
+// **workgroup-memory tiled**: one workgroup processes one row of N
+// complex samples and runs all log₄(N) butterfly stages inside a
+// single dispatch, with `workgroupBarrier()` between stages.
 //
-// Real-input optimisation (RFFT packing N=256 real → N/2=128 complex)
-// is **not** in C-1-1 scope: 128 = 2 × 64 is not a clean radix-4 size
-// (would need a mixed-radix tail stage). C-1-1 keeps the input fully
-// complex (imag = 0 on load); RFFT-packed variant is deferred to a
-// later sub-step once the dispatch shape stabilises. The 2× memory /
-// 2× compute cost is acceptable for a primitive that has zero callers
-// inside the simulator step until C-1-4.
+// **Dynamic N support (C-1-2)**: `WORKGROUP_X` is a WGSL pipeline-
+// override constant; the host sets it to N at pipeline construction
+// (see `FftPass::new(ctx, n)`). The same `digit_reverse_4_dynamic`
+// works for any N = 4^k (i.e. log₄ N digits in base 4), and the
+// `while stage_size <= n` loop walks the log₄(N) stages. N values
+// **must be a pure power of 4**: {4, 16, 64, 256, 1024, …}.
+// Flow-Lenia grids 32 / 128 / 512 are excluded here (mixed-radix
+// needed) — Ponyo877 さん 承認の defer に M6.C-1-2 scope。
+//
+// **Direction flag (C-1-2)**: `params.direction ∈ {0=forward, 1=inverse}`.
+// Inverse re-uses the **same forward butterfly** unchanged, applying
+// the standard `IDFT(y) = (1/N) conj(DFT(conj(y)))` identity at the
+// load (conjugate input) and store (conjugate + 1/N normalise) boundaries.
+//
+// A first C-1-2 attempt used "conjugate the twiddle table only" and
+// hit a subtle bug: the radix-4 butterfly bakes a `+i*(q1-q3)` term
+// (corresponding to W_S^{S/4} = -i in the forward direction); switching
+// from W to W^* requires that intermediate to flip to `-i*(q1-q3)` as
+// well, otherwise the algorithm computes a position-reversed output
+// (`output[k] = N * x[(-k) mod N]` instead of `N * x[k]`). Caught by
+// `fft_1d_gpu_inverse_round_trip` at idx=1 — manual N=4 derivation
+// matched the wrong answer (`output[1] = 4*x[3]` instead of `4*x[1]`).
+// Switching to the conjugate-load / conjugate-store identity avoids
+// having to fork the butterfly for direction.
+//
+// Per-stage dispatch (WebTide pattern) was rejected in C-1-1 because
+// Metal per-dispatch overhead is 32-71 μs (Maczan 2026); 1 dispatch
+// per axis covers all log₄(N) stages and keeps the 2D path (this
+// shader + `fft_1d_radix4_v.wgsl`) at 2 dispatches per direction.
 //
 // References:
-//   - fgiesen, "Notes on FFTs: for implementers" (2023): radix-4 over
-//     radix-2 for fewer twiddle reads, Cooley-Tukey in-place over
-//     Stockham ping-pong to keep working set in L1 (here: 32 KB
-//     threadgroup memory).
-//   - Lloyd 2008, "Fast computation of general Fourier Transforms on
-//     GPUs", Microsoft TR-2008-62.
-//   - WebTide WGSL FFT (BarthPaleologue) as a negative example of
-//     per-stage dispatch — survey §2.3.
+//   - fgiesen 2023, "Notes on FFTs: for implementers"
+//   - Lloyd 2008, Microsoft TR-2008-62
+//   - docs/M6_literature_survey.md §2 for the design rationale
+//     trail (Cooley-Tukey over Stockham, radix-4 over radix-2,
+//     workgroup-tiled over per-stage dispatch).
 //
 // Layout / binding contract (must agree with `passes/fft.rs`):
-//   @binding(0) input:    storage<read>, real f32 flat:
-//                            input[row * N + i],  i ∈ [0, 256)
-//   @binding(1) twiddles: storage<read>, vec2<f32> = (cos θ, -sin θ),
-//                            full N entries indexed in [0, N). The
-//                            butterfly needs W_N^{k}, W_N^{2k},
-//                            W_N^{3k}; `2k` and `3k` reach up to ~3N/4
-//                            so the "first-quadrant only" economy
-//                            doesn't fit a 3-twiddle butterfly without
-//                            folding logic — see precompute_twiddles_1d
-//                            rustdoc for the trade-off.
-//   @binding(2) output:   storage<read_write>, vec2<f32> complex flat:
-//                            output[row * N + i],  i ∈ [0, 256)
-//                            **natural frequency order** (DC, f1, …,
-//                            fN-1); for real input the bins
-//                            (N/2+1 .. N-1) are the complex conjugate
-//                            of (N/2-1 .. 1) — downstream consumers
-//                            may exploit or ignore this symmetry.
-//   @binding(3) params:   uniform<FftParams>{ n: u32 = 256, num_rows: u32 }
-//                            `n` is asserted == 256 by
-//                            `FftPass::upload_params` for C-1-1
-//                            (callers constructing their own uniform
-//                            buffer bypass this gate); C-1-2 will
-//                            generalise the WGSL to runtime-N and
-//                            the assertion lifts with it.
-//
-// Workgroup design: (256, 1, 1) = 1 invocation per complex sample,
-// 256 threads per row, dispatched (num_rows, 1, 1) workgroups. Each
-// stage `stage_size ∈ {4, 16, 64, 256}` has `N/4 = 64` active
-// butterflies — only the first 64 threads do work each stage; the
-// other 192 threads idle through the stage barrier. This wastes
-// occupancy by design: keeping the load step "1 thread = 1 sample"
-// matches the natural shape of input/output, and the stage idle is
-// cheap compared to either a stride-quartering load or extra
-// barrier-sync work.
-//
-// Bit / digit-reversal: input is digit-reversed in **base 4** on
-// load (DIT convention), so the in-place butterflies produce
-// natural-ordered output. log₄(256) = 4 digits, so the reversal is
-// 4 lookup-free arithmetic shifts; no precomputed table.
-//
-// Threadgroup memory: 256 × vec2<f32> = 2 KB scratch, well inside
-// the M1 G13 32 KB threadgroup-memory budget (survey §5.2). No
-// register-pressure concerns at this size on M1's 208 KiB/threadgroup
-// register file.
+//   @binding(0) input:    storage<read>, real f32 flat,
+//                            input[row * N + i]  for direction=forward,
+//                         OR  storage<read>, complex vec2<f32> flat,
+//                            input[row * N + i]  for direction=inverse
+//   @binding(1) twiddles: storage<read>, vec2<f32> = (cos θ, -sin θ)
+//                            for θ = 2π k / N — the **forward** table;
+//                            inverse uses conjugate in-shader.
+//                            Full N entries (see precompute_twiddles_1d
+//                            rustdoc for why N/4 economy fails).
+//   @binding(2) output:   storage<read_write>, vec2<f32> complex flat,
+//                            output[row * N + i],  natural frequency
+//                            order (DC at idx 0).
+//                            For direction=inverse, also real-valued
+//                            modulo numerical drift; caller may take
+//                            `.x` and discard `.y`.
+//   @binding(3) params:   uniform<FftParams>{ n, num_rows, direction, _pad }
+
+// Pipeline-override constant: host pins this to N at pipeline build
+// (`FftPass::new(ctx, n)`). Must equal `params.n` set in the uniform.
+override WORKGROUP_X: u32 = 256u;
 
 struct FftParams {
     n: u32,
     num_rows: u32,
+    direction: u32, // 0 = forward, 1 = inverse
+    _pad: u32,
 };
 
 @group(0) @binding(0) var<storage, read>       input:    array<f32>;
@@ -84,32 +77,40 @@ struct FftParams {
 @group(0) @binding(2) var<storage, read_write> output:   array<vec2<f32>>;
 @group(0) @binding(3) var<uniform>             params:   FftParams;
 
+// Worst-case scratch: N=256 complex × 8 byte = 2 KB. M1 32 KB
+// threadgroup memory has ample headroom. WGSL requires this to be
+// a fixed-size array; sizing for 256 covers all supported N ≤ 256.
 var<workgroup> scratch: array<vec2<f32>, 256>;
 
 fn complex_mul(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
-    // (a.x + i a.y)(b.x + i b.y) = (ax bx - ay by) + i (ax by + ay bx)
     return vec2<f32>(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
 }
 
-// i * (x + iy) = -y + ix — radix-4 needs this 90° rotation on the
-// (q1 - q3) intermediate; inlining it as one swap+negate beats a
-// runtime twiddle multiply by (0, 1).
 fn complex_mul_i(a: vec2<f32>) -> vec2<f32> {
     return vec2<f32>(-a.y, a.x);
 }
 
-// Base-4 digit reverse for the 4-digit (= log₄ 256) index. Cheaper
-// than a precomputed table at this size; reads are uniform across
-// threads of the workgroup so there is no divergence cost.
-fn digit_reverse_4(i: u32) -> u32 {
-    let d0 = i & 3u;
-    let d1 = (i >> 2u) & 3u;
-    let d2 = (i >> 4u) & 3u;
-    let d3 = (i >> 6u) & 3u;
-    return (d0 << 6u) | (d1 << 4u) | (d2 << 2u) | d3;
+// No direction-dependent twiddle conjugation — the inverse handles
+// direction via load/store conjugation only (see file header).
+
+// Dynamic base-4 digit reverse over log₄(n) digits. Walks the
+// reversal one base-4 digit at a time until `size` drops to 1. For
+// n=256 this runs 4 iterations; for n=64 it runs 3. Branch-free
+// inside the loop body; `size` is uniform across the workgroup so
+// no divergence cost.
+fn digit_reverse_4_dynamic(i: u32, n: u32) -> u32 {
+    var x = i;
+    var r: u32 = 0u;
+    var size: u32 = n;
+    while (size > 1u) {
+        r = (r << 2u) | (x & 3u);
+        x = x >> 2u;
+        size = size >> 2u;
+    }
+    return r;
 }
 
-@compute @workgroup_size(256, 1, 1)
+@compute @workgroup_size(WORKGROUP_X, 1, 1)
 fn fft_1d_radix4(
     @builtin(local_invocation_id) lid: vec3<u32>,
     @builtin(workgroup_id) wid: vec3<u32>,
@@ -119,41 +120,41 @@ fn fft_1d_radix4(
         return;
     }
     let tid = lid.x;
-    let n = params.n; // == 256 by FftPass::upload_params precondition
+    let n = params.n;
+    if (tid >= n) {
+        return;
+    }
     let row_base = row * n;
 
-    // Load: real input → complex scratch (imag = 0), digit-reversed
-    // base 4. After this load + barrier the in-place butterflies
-    // produce natural-ordered output.
-    let src = digit_reverse_4(tid);
-    scratch[tid] = vec2<f32>(input[row_base + src], 0.0);
+    // Load: bit/digit-reversed input → complex scratch. For
+    // direction=forward the input is real (imag = 0); for
+    // direction=inverse the input is complex and we **conjugate on
+    // load** (negate imag) so the unchanged forward butterfly
+    // produces conj(N * IDFT) which the store-side conjugation
+    // converts back to N * IDFT, then /N gives IDFT.
+    let src = digit_reverse_4_dynamic(tid, n);
+    if (params.direction == 0u) {
+        scratch[tid] = vec2<f32>(input[row_base + src], 0.0);
+    } else {
+        let base = 2u * (row_base + src);
+        scratch[tid] = vec2<f32>(input[base], -input[base + 1u]);
+    }
     workgroupBarrier();
 
-    // log₄(256) = 4 stages: stage_size grows 4 → 16 → 64 → 256.
-    // Each stage has N/4 = 64 butterflies, each combining 4 samples
-    // spaced by `quarter = stage_size / 4` inside their group of
-    // `stage_size` consecutive elements.
+    // log₄(n) stages: stage_size grows 4 → 16 → … → n.
+    // Each stage has n/4 butterflies; only the first n/4 threads
+    // run a butterfly. Per-stage idle (75 % at the largest sizes
+    // active here) is documented in C-1-1 rustdoc as a design choice.
     var stage_size: u32 = 4u;
     while (stage_size <= n) {
         let quarter = stage_size / 4u;
 
-        // Only the first 64 threads (= N/4) run a butterfly each
-        // stage; threads ∈ [64, 256) idle through this stage's
-        // barrier. See the workgroup-design rationale at the top of
-        // the file: keeping load/store as "1 thread = 1 sample" is
-        // worth the per-stage idle.
         if (tid < n / 4u) {
             let butterfly_idx = tid;
             let group_idx = butterfly_idx / quarter;
             let local_idx = butterfly_idx % quarter;
             let base = group_idx * stage_size + local_idx;
 
-            // Twiddle stride: stage `s` uses W_N^{k * (N / stage_size)}
-            // for k ∈ [0, stage_size/4). The twiddle buffer holds
-            // W_N^k for the **full** k ∈ [0, N) (256 entries for N=256)
-            // — see `precompute_twiddles_1d` rustdoc for why the
-            // first-quadrant-only economy was rejected (2*w_idx and
-            // 3*w_idx reach up to ~3N/4 and would OOB-read 0).
             let twiddle_stride = n / stage_size;
             let w_idx = local_idx * twiddle_stride;
             let w1 = twiddles[w_idx];
@@ -169,17 +170,6 @@ fn fft_1d_radix4(
             let q2 = complex_mul(p2, w2);
             let q3 = complex_mul(p3, w3);
 
-            // Radix-4 DIT butterfly (matches Cooley-Tukey "decimation
-            // in time" sign convention `W = exp(-2πi/N)`):
-            //   t0 = p0 + q2,  t1 = p0 - q2,  t2 = q1 + q3,
-            //   t3 = i * (q1 - q3)
-            //   out[base + 0*q] = t0 + t2
-            //   out[base + 1*q] = t1 - t3
-            //   out[base + 2*q] = t0 - t2
-            //   out[base + 3*q] = t1 + t3
-            // Sanity check: at the final stage (stage_size = n) the
-            // four outputs sit at base, base+n/4, base+n/2, base+3n/4
-            // which is the natural-ordered frequency layout.
             let t0 = p0 + q2;
             let t1 = p0 - q2;
             let t2 = q1 + q3;
@@ -194,8 +184,15 @@ fn fft_1d_radix4(
         stage_size = stage_size * 4u;
     }
 
-    // Store: 1 thread = 1 complex output sample. Natural frequency
-    // order (DC at index 0, increasing frequency thereafter, with the
-    // real-input conjugate-symmetric upper half implicit).
-    output[row_base + tid] = scratch[tid];
+    // Store: 1 thread = 1 complex output sample. For direction=inverse
+    // conjugate the butterfly output (close the identity `IDFT(y) =
+    // (1/N) conj(DFT(conj(y)))`) and normalise by 1/N (rustfft
+    // convention: forward unnormalised, inverse divides by N).
+    let val = scratch[tid];
+    if (params.direction == 0u) {
+        output[row_base + tid] = val;
+    } else {
+        let inv_n = 1.0 / f32(n);
+        output[row_base + tid] = vec2<f32>(val.x, -val.y) * inv_n;
+    }
 }

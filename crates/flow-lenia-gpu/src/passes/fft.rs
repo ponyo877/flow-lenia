@@ -1,85 +1,169 @@
-//! M6.C-1-1 — 1D radix-4 Cooley-Tukey FFT compute pass.
+//! M6.C-1-1 / M6.C-1-2 — 1D + 2D radix-4 Cooley-Tukey FFT.
 //!
-//! Compiles `src/shaders/fft_1d_radix4.wgsl` (see that file for the
-//! algorithm and binding contract) and exposes:
+//! C-1-1 introduced [`FftPass`] (1D forward, N=256 fixed). C-1-2
+//! extends this to:
 //!
-//! - [`FftPass`] — pipeline + bind-group layout, one-shot construction
-//!   per `GpuContext`. Currently locked to N=256; the assertion lives
-//!   in [`FftPass::upload_params`] so the WGSL invariants documented
-//!   at the top of `fft_1d_radix4.wgsl` cannot be silently violated
-//!   on the standard build path (callers constructing their own
-//!   uniform buffer bypass this gate; C-1-2 will generalise the WGSL
-//!   to runtime-N and the assertion lifts with it).
-//! - [`precompute_twiddles_1d`] — uploads the N/4 forward-FFT
-//!   twiddle factors `W_N^k = exp(-2πi k / N)` once at startup, used
-//!   for every subsequent dispatch.
-//! - [`FftParams`] — `vec2<u32> = (n, num_rows)` uniform, matching
-//!   the WGSL `struct FftParams`.
+//! - **Dynamic N** ∈ {64, 256} via WGSL pipeline-override constants
+//!   on `WORKGROUP_X`. Mixed-radix sizes (32, 128, 512) are out of
+//!   scope for M6.C-1 — those need a radix-2 fall-out stage and are
+//!   deferred to a later sub-step (per M6.B literature survey §2.5
+//!   + scope-guardian approval for C-1-2: pure radix-4 first, 512
+//!   add-on if the main goal demands it).
+//! - **Forward / inverse direction** via a runtime `direction` flag
+//!   in `FftParams`. The same WGSL pipeline serves both directions;
+//!   inverse re-uses the forward twiddle table by conjugating
+//!   in-shader and applies the 1/N normalisation at store time
+//!   (rustfft / NumPy convention: forward unnormalised, inverse
+//!   divides by N).
+//! - **2D separable transform** via [`Fft2dPass`], which composes a
+//!   per-row pass (`fft_1d_radix4.wgsl`) with a per-column pass
+//!   (`fft_1d_radix4_v.wgsl`). 2 dispatches per direction, no
+//!   transpose pass. See `fft_1d_radix4_v.wgsl` header for the
+//!   column-stride trade-off (memory bandwidth vs avoiding a
+//!   transpose pass with its own dispatch overhead).
 //!
-//! Per-step usage (once C-1-4 wires this into `ConvolvePass`):
+//! Hot-path usage (C-1-4 will wire this into `ConvolvePass`):
 //!
 //! ```text
-//! let pass = FftPass::new(&ctx);                      // startup
-//! let twiddles = precompute_twiddles_1d(&ctx, 256);   // startup
-//! let bg = pass.make_bind_group(&ctx, &in_buf, &twiddles, &out_buf, &params_buf);
-//! let mut enc = ctx.device.create_command_encoder(...);
-//! pass.record(&mut enc, &bg, num_rows);
-//! ctx.queue.submit([enc.finish()]);
+//! // Startup
+//! let pass2d   = Fft2dPass::new(&ctx, 256);
+//! let twiddles = precompute_twiddles_1d(&ctx, 256);
+//!
+//! // Per step:
+//! //  - upload params with direction=Forward
+//! //  - bind_group: input=real f32 H×W, twiddles, intermediate vec2 H×W, params
+//! //  - record_axis(H, num_rows=H)  → intermediate has H-axis spectrum
+//! //  - re-bind: input=intermediate (as flat f32), output=spectrum
+//! //  - record_axis(V, num_rows=W)  → spectrum is the 2D FFT
+//! //  - (spectral multiply by per-kernel pre-FFT  — C-1-3 scope)
+//! //  - mirror inverse path with direction=Inverse to recover the field
 //! ```
 //!
-//! `record` only appends the dispatch; submission and synchronisation
-//! are the caller's responsibility, matching the M2.3+ pattern used
-//! by every other pass in this crate.
+//! `record_axis` only appends the dispatch; submission and
+//! synchronisation are the caller's responsibility, matching the
+//! M2.3+ pattern used by every other pass in this crate.
 
 use crate::GpuContext;
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
-/// Fixed 1D transform length for the C-1-1 primitive. Generalising
-/// to runtime-chosen N (32 / 64 / 128 / 256 / 512) is C-1-2 scope.
-pub const FFT_N: u32 = 256;
+/// Pure-radix-4 sizes supported by the C-1-2 dispatch shape. Adding
+/// 32 / 128 / 512 requires a radix-2 fall-out stage in the WGSL —
+/// deferred per scope-guardian approval, will be revisited when the
+/// Flow-Lenia grid sweep needs them (currently the main goal is
+/// 256×256×4creature + 512×512 hi-end mode).
+pub const SUPPORTED_N: &[u32] = &[64, 256];
 
-/// Workgroup width matches `@workgroup_size(256, 1, 1)` in
-/// `fft_1d_radix4.wgsl` and equals `FFT_N` by construction. Exposed
-/// so downstream tests can compute the dispatch count without
-/// re-deriving the constant.
-pub const WORKGROUP_X: u32 = FFT_N;
+/// Direction of a 1D pass. Same WGSL pipeline runs both; the runtime
+/// flag flips twiddle conjugation and per-cell 1/N normalisation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FftDirection {
+    Forward = 0,
+    Inverse = 1,
+}
 
-/// Mirror of the WGSL `struct FftParams` — push-constants would be
-/// nicer but wgpu's `Features::PUSH_CONSTANTS` is not part of the
-/// WebGPU 1.0 spec, so a uniform buffer keeps the path web-compatible.
+/// Axis selector for 2D dispatches. The two axes use different WGSL
+/// pipelines (row-stride vs column-stride load/store), assembled into
+/// a single [`Fft2dPass`] for the caller's convenience.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FftAxis {
+    H,
+    V,
+}
+
+/// Mirror of the WGSL `struct FftParams`. The `_pad` field exists
+/// to round to 16-byte uniform alignment per the WGSL spec.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct FftParams {
     pub n: u32,
-    pub num_rows: u32,
+    pub num_rows: u32, // V-axis pass: column count
+    pub direction: u32,
+    pub _pad: u32,
 }
 
-/// Compiled 1D radix-4 FFT pass.
+impl FftParams {
+    /// Build a `FftParams` with `direction` typed and `_pad` zeroed.
+    /// `num_rows` for H is row count, for V is column count.
+    #[must_use]
+    pub fn new(n: u32, num_rows: u32, direction: FftDirection) -> Self {
+        Self {
+            n,
+            num_rows,
+            direction: direction as u32,
+            _pad: 0,
+        }
+    }
+}
+
+/// Check whether `n` is a supported pure-radix-4 transform length.
+#[must_use]
+pub fn is_supported_n(n: u32) -> bool {
+    SUPPORTED_N.contains(&n)
+}
+
+/// Compiled 1D radix-4 FFT pass for a single axis. C-1-1 callers
+/// instantiate this directly via [`FftPass::new_h`]; C-1-2 callers
+/// should prefer [`Fft2dPass`] which owns both H and V passes.
 pub struct FftPass {
+    pub n: u32,
     pub pipeline: wgpu::ComputePipeline,
     pub bind_group_layout: wgpu::BindGroupLayout,
 }
 
 impl FftPass {
-    /// Compile `fft_1d_radix4.wgsl` and build the pipeline. Call once
-    /// per `GpuContext`.
+    /// Compile the H-axis (row-stride) variant. Convenience for the
+    /// C-1-1 1D-only tests; new C-1-2 callers should use
+    /// [`Fft2dPass::new`] instead.
     #[must_use]
-    pub fn new(ctx: &GpuContext) -> Self {
-        const SOURCE: &str = include_str!("../shaders/fft_1d_radix4.wgsl");
+    pub fn new_h(ctx: &GpuContext, n: u32) -> Self {
+        Self::compile(
+            ctx,
+            n,
+            include_str!("../shaders/fft_1d_radix4.wgsl"),
+            "fft_1d_radix4",
+            "fft_1d_radix4.wgsl",
+        )
+    }
+
+    /// Compile the V-axis (column-stride) variant.
+    #[must_use]
+    pub fn new_v(ctx: &GpuContext, n: u32) -> Self {
+        Self::compile(
+            ctx,
+            n,
+            include_str!("../shaders/fft_1d_radix4_v.wgsl"),
+            "fft_1d_radix4_v",
+            "fft_1d_radix4_v.wgsl",
+        )
+    }
+
+    fn compile(
+        ctx: &GpuContext,
+        n: u32,
+        source: &str,
+        entry: &str,
+        label: &str,
+    ) -> Self {
+        assert!(
+            is_supported_n(n),
+            "C-1-2 FftPass supports N ∈ {SUPPORTED_N:?} (got {n}); \
+             mixed-radix sizes (32/128/512) require a radix-2 fall-out \
+             stage and are out of scope for M6.C-1-2."
+        );
+
         let shader = ctx
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("fft_1d_radix4.wgsl"),
-                source: wgpu::ShaderSource::Wgsl(SOURCE.into()),
+                label: Some(label),
+                source: wgpu::ShaderSource::Wgsl(source.into()),
             });
 
         let bind_group_layout =
             ctx.device
                 .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("fft_1d_radix4 bind group layout"),
+                    label: Some(&format!("{entry} bind group layout")),
                     entries: &[
-                        // input: storage<read>, real f32
                         wgpu::BindGroupLayoutEntry {
                             binding: 0,
                             visibility: wgpu::ShaderStages::COMPUTE,
@@ -90,7 +174,6 @@ impl FftPass {
                             },
                             count: None,
                         },
-                        // twiddles: storage<read>, vec2<f32>
                         wgpu::BindGroupLayoutEntry {
                             binding: 1,
                             visibility: wgpu::ShaderStages::COMPUTE,
@@ -101,7 +184,6 @@ impl FftPass {
                             },
                             count: None,
                         },
-                        // output: storage<read_write>, vec2<f32>
                         wgpu::BindGroupLayoutEntry {
                             binding: 2,
                             visibility: wgpu::ShaderStages::COMPUTE,
@@ -112,7 +194,6 @@ impl FftPass {
                             },
                             count: None,
                         },
-                        // params: uniform
                         wgpu::BindGroupLayoutEntry {
                             binding: 3,
                             visibility: wgpu::ShaderStages::COMPUTE,
@@ -129,32 +210,41 @@ impl FftPass {
         let pipeline_layout = ctx
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("fft_1d_radix4 pipeline layout"),
+                label: Some(&format!("{entry} pipeline layout")),
                 bind_group_layouts: &[Some(&bind_group_layout)],
                 immediate_size: 0,
             });
 
+        // Pipeline-override constant: pin WORKGROUP_X to N. This lets
+        // one WGSL source produce a different `@workgroup_size(N,1,1)`
+        // per pipeline without text-template hacks. See WGSL spec
+        // "pipeline-overridable constants". wgpu 29 takes the
+        // overrides as `&[(&str, f64)]`.
+        let constants: [(&str, f64); 1] = [("WORKGROUP_X", f64::from(n))];
+
         let pipeline = ctx
             .device
             .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("fft_1d_radix4 pipeline"),
+                label: Some(&format!("{entry} pipeline (N={n})")),
                 layout: Some(&pipeline_layout),
                 module: &shader,
-                entry_point: Some("fft_1d_radix4"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                entry_point: Some(entry),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &constants,
+                    zero_initialize_workgroup_memory: false,
+                },
                 cache: None,
             });
 
         Self {
+            n,
             pipeline,
             bind_group_layout,
         }
     }
 
     /// Assemble a bind group for one (input, twiddles, output, params)
-    /// quadruple. Hot-loop callers (post C-1-4) should reuse a single
-    /// bind group across submissions when the buffer identities don't
-    /// change — only `params_buf`'s `num_rows` field varies.
+    /// quadruple.
     #[must_use]
     pub fn make_bind_group(
         &self,
@@ -188,14 +278,13 @@ impl FftPass {
         })
     }
 
-    /// Append one dispatch processing `num_rows` rows of `FFT_N=256`
-    /// samples each. The caller is responsible for setting
-    /// `params.num_rows` in the uniform buffer before submitting.
+    /// Append one dispatch processing `num_rows` rows (or `num_cols`
+    /// columns for the V variant) of `n` complex samples each.
     pub fn record(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         bind_group: &wgpu::BindGroup,
-        num_rows: u32,
+        num_rows_or_cols: u32,
     ) {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("fft_1d_radix4 pass"),
@@ -203,25 +292,25 @@ impl FftPass {
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, bind_group, &[]);
-        // dispatch (num_rows, 1, 1) workgroups; each is 256 threads
-        // processing one row.
-        pass.dispatch_workgroups(num_rows, 1, 1);
+        pass.dispatch_workgroups(num_rows_or_cols, 1, 1);
     }
 
     /// Convenience: upload an `FftParams` value as a uniform buffer.
     ///
-    /// Enforces the C-1-1 invariant `params.n == FFT_N` at the helper
-    /// boundary (Round 1 review M1: the rustdoc at the top of this
-    /// file promised `record()`-side enforcement that did not exist).
-    /// Lifting this assertion lives at C-1-2, when the WGSL gains
-    /// dynamic-N support.
+    /// Enforces the `params.n == self.n` invariant at the helper
+    /// boundary so the WGSL `digit_reverse_4_dynamic` walk and the
+    /// stage loop match the pipeline-baked `WORKGROUP_X`. Callers
+    /// constructing their own uniform buffer bypass this gate (see
+    /// crate rustdoc caveat).
     #[must_use]
-    pub fn upload_params(ctx: &GpuContext, params: FftParams) -> wgpu::Buffer {
+    pub fn upload_params(&self, ctx: &GpuContext, params: FftParams) -> wgpu::Buffer {
         assert_eq!(
-            params.n, FFT_N,
-            "FftParams.n must equal FFT_N={FFT_N} for the C-1-1 primitive \
-             (the WGSL digit_reverse_4 and stage loop bake N=256). \
-             Dynamic-N support lands in C-1-2."
+            params.n, self.n,
+            "FftParams.n={got} must equal FftPass.n={expected} \
+             (the WGSL workgroup_size and stage loop were baked at \
+             pipeline construction).",
+            got = params.n,
+            expected = self.n,
         );
         assert!(
             params.num_rows >= 1,
@@ -234,6 +323,37 @@ impl FftPass {
                 contents: bytemuck::bytes_of(&params),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             })
+    }
+}
+
+/// Compiled 2D radix-4 FFT pass: owns both H and V passes for a
+/// given `n`. Forward and inverse share pipelines via the runtime
+/// `direction` flag in `FftParams`.
+pub struct Fft2dPass {
+    pub n: u32,
+    pub h: FftPass,
+    pub v: FftPass,
+}
+
+impl Fft2dPass {
+    /// Build both axis passes for transform length `n`. `n` must be
+    /// in [`SUPPORTED_N`].
+    #[must_use]
+    pub fn new(ctx: &GpuContext, n: u32) -> Self {
+        Self {
+            n,
+            h: FftPass::new_h(ctx, n),
+            v: FftPass::new_v(ctx, n),
+        }
+    }
+
+    /// Pick the per-axis sub-pass.
+    #[must_use]
+    pub fn axis(&self, axis: FftAxis) -> &FftPass {
+        match axis {
+            FftAxis::H => &self.h,
+            FftAxis::V => &self.v,
+        }
     }
 }
 
@@ -252,10 +372,8 @@ impl FftPass {
 /// regardless, because for a δ input every butterfly already has
 /// p1=p2=p3=0 and the twiddle multiplies don't affect the output).
 ///
-/// The 4× memory cost over the "first quadrant" trick is 256 ×
-/// 8 byte = 2 KB at N=256, dwarfed by the per-row workgroup-memory
-/// scratch and not worth the index-folding complexity it would
-/// require. A future RFFT-packed variant (deferred) may revisit.
+/// Inverse FFT re-uses this same table by conjugating in-shader
+/// (`twiddle_for_direction`), so we keep one table per N — not two.
 ///
 /// Built on CPU once at pipeline construction; uploaded as STORAGE
 /// (not UNIFORM) because the buffer is read by stride-pattern indices
@@ -297,21 +415,21 @@ mod tests {
         crate::validation::test_ctx_for_lib()
     }
 
-    /// Helper: run forward FFT on `num_rows × FFT_N` real input,
-    /// return the full `num_rows × FFT_N` complex output flat.
-    fn run_forward(
+    // ─── 1D tests (unchanged from C-1-1, retained for regression) ───────
+
+    fn run_forward_1d(
         ctx: &GpuContext,
         pass: &FftPass,
         twiddles: &wgpu::Buffer,
         input_real: &[f32],
     ) -> Vec<[f32; 2]> {
+        let n = pass.n as usize;
         assert!(
-            input_real.len() % FFT_N as usize == 0,
-            "input length must be a multiple of FFT_N=256 (got {})",
-            input_real.len()
+            input_real.len() % n == 0,
+            "input length must be a multiple of N={n}"
         );
-        let num_rows = (input_real.len() / FFT_N as usize) as u32;
-        let n_complex = (num_rows * FFT_N) as usize;
+        let num_rows = (input_real.len() / n) as u32;
+        let n_complex = (num_rows as usize) * n;
 
         let input_buf = ctx
             .device
@@ -326,12 +444,9 @@ mod tests {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
-        let params_buf = FftPass::upload_params(
+        let params_buf = pass.upload_params(
             ctx,
-            FftParams {
-                n: FFT_N,
-                num_rows,
-            },
+            FftParams::new(pass.n, num_rows, FftDirection::Forward),
         );
         let bg = pass.make_bind_group(ctx, &input_buf, twiddles, &output_buf, &params_buf);
 
@@ -353,45 +468,33 @@ mod tests {
         flat.chunks_exact(2).map(|c| [c[0], c[1]]).collect()
     }
 
-    fn cpu_reference_fft(input: &[f32]) -> Vec<[f32; 2]> {
+    fn cpu_reference_fft_1d(n: usize, input: &[f32]) -> Vec<[f32; 2]> {
         let mut planner = FftPlanner::<f32>::new();
-        let fft = planner.plan_fft_forward(FFT_N as usize);
+        let fft = planner.plan_fft_forward(n);
         let mut buf: Vec<Complex32> = input.iter().map(|&v| Complex32::new(v, 0.0)).collect();
-        // rustfft processes in chunks of FFT_N
-        for chunk in buf.chunks_mut(FFT_N as usize) {
+        for chunk in buf.chunks_mut(n) {
             fft.process(chunk);
         }
         buf.iter().map(|c| [c.re, c.im]).collect()
     }
 
-    /// Compare GPU FFT against rustfft on a deterministic random
-    /// signal. rustfft is the canonical CPU reference; relative
-    /// tolerance 1e-4 absorbs the radix-4 vs split-radix accumulation-
-    /// order f32 drift while still catching algorithmic bugs.
-    ///
-    /// **Observed on M1 mini (2026-05-25)**: `max_abs ≈ 2.86e-6`,
-    /// `max_rel ≈ 1.06e-6`. The committed tolerance (`rel < 1e-4 ||
-    /// abs < 1e-5`) carries ~100× headroom over both measurements —
-    /// loose enough to survive driver / Naga upgrades, tight enough
-    /// that a 100× regression from a real bug trips immediately.
-    /// Tighten the screw if a future commit shows the observed
-    /// values stable at 10× headroom across multiple runs.
+    /// **Observed on M1 mini (2026-05-25)**: max_abs ≈ 2.86e-6,
+    /// max_rel ≈ 1.06e-6. Tolerance carries ~100× headroom.
     #[test]
     fn fft_1d_matches_rustfft() {
         let (ctx, guard) = headless_ctx();
-        let pass = FftPass::new(&ctx);
-        let twiddles = precompute_twiddles_1d(&ctx, FFT_N);
+        let pass = FftPass::new_h(&ctx, 256);
+        let twiddles = precompute_twiddles_1d(&ctx, 256);
 
         let mut rng = ChaCha8Rng::seed_from_u64(0xFF7_1D42);
         let n_rows: usize = 4;
-        let input: Vec<f32> = (0..(n_rows * FFT_N as usize))
+        let input: Vec<f32> = (0..(n_rows * 256))
             .map(|_| rng.gen_range(-1.0_f32..1.0))
             .collect();
 
-        let gpu = run_forward(&ctx, &pass, &twiddles, &input);
-        let cpu = cpu_reference_fft(&input);
+        let gpu = run_forward_1d(&ctx, &pass, &twiddles, &input);
+        let cpu = cpu_reference_fft_1d(256, &input);
 
-        assert_eq!(gpu.len(), cpu.len(), "output length mismatch");
         let mut max_abs = 0.0_f32;
         let mut max_rel = 0.0_f32;
         for (i, (g, c)) in gpu.iter().zip(cpu.iter()).enumerate() {
@@ -403,62 +506,263 @@ mod tests {
             max_rel = max_rel.max(rel);
             assert!(
                 rel < 1e-4 || abs_re.max(abs_im) < 1e-5,
-                "bin {i} (row {row}, freq {freq}): gpu=({g0:e}, {g1:e}) cpu=({c0:e}, {c1:e}) \
-                 abs_re={abs_re:.3e} abs_im={abs_im:.3e} rel={rel:.3e}",
-                row = i / FFT_N as usize,
-                freq = i % FFT_N as usize,
-                g0 = g[0],
-                g1 = g[1],
-                c0 = c[0],
-                c1 = c[1],
+                "bin {i}: rel={rel:.3e} abs_re={abs_re:.3e} abs_im={abs_im:.3e}"
             );
         }
-        eprintln!(
-            "[M6.C-1-1] fft_1d vs rustfft, {n_rows} × {FFT_N} : \
-             max_abs={max_abs:.3e}  max_rel={max_rel:.3e}"
-        );
+        eprintln!("[M6.C-1-1] fft_1d vs rustfft N=256 : max_abs={max_abs:.3e}  max_rel={max_rel:.3e}");
 
         if let Some(g) = &guard {
             g.assert_no_errors();
         }
     }
 
-    /// Round-trip: forward(GPU) → inverse(rustfft) ≈ original input.
-    /// Inverse is intentionally CPU-only in C-1-1; the GPU inverse
-    /// is its own deliverable in a later sub-step.
-    ///
-    /// **Observed on M1 mini (2026-05-25)**: `max_abs ≈ 2.38e-7`.
-    /// Tolerance 1e-4 carries ~400× headroom.
+    /// 1D GPU forward + GPU inverse round-trip — isolates whether the
+    /// inverse path is correct without involving 2D orchestration.
+    /// Implementation hoisted into `run_1d_gpu_round_trip` so the N=64
+    /// sibling shares the same code path (Round 2 review NC1).
     #[test]
-    fn fft_1d_round_trip_via_rustfft_inverse() {
-        let (ctx, guard) = headless_ctx();
-        let pass = FftPass::new(&ctx);
-        let twiddles = precompute_twiddles_1d(&ctx, FFT_N);
+    fn fft_1d_gpu_inverse_round_trip() {
+        let max_abs = run_1d_gpu_round_trip(0xFF7_1D_67, 256);
+        eprintln!("[M6.C-1-2] fft_1d GPU round-trip N=256 : max_abs={max_abs:.3e}");
+    }
 
-        let mut rng = ChaCha8Rng::seed_from_u64(0xFF7_1D43);
-        let n_rows: usize = 2;
-        let input: Vec<f32> = (0..(n_rows * FFT_N as usize))
+    /// Impulse response — see C-1-1 rustdoc for the coverage caveat
+    /// (impulse passes regardless of twiddle bugs because p1=p2=p3=0).
+    #[test]
+    fn fft_1d_impulse_response_is_all_ones() {
+        let (ctx, guard) = headless_ctx();
+        let pass = FftPass::new_h(&ctx, 256);
+        let twiddles = precompute_twiddles_1d(&ctx, 256);
+
+        let mut input = vec![0.0_f32; 256];
+        input[0] = 1.0;
+        let gpu = run_forward_1d(&ctx, &pass, &twiddles, &input);
+        for (i, c) in gpu.iter().enumerate() {
+            let abs_re = (c[0] - 1.0).abs();
+            let abs_im = c[1].abs();
+            assert!(
+                abs_re < 1e-5 && abs_im < 1e-5,
+                "bin {i}: gpu=({:e}, {:e})",
+                c[0],
+                c[1]
+            );
+        }
+        eprintln!("[M6.C-1-1] fft_1d impulse → all-ones : pass");
+
+        if let Some(g) = &guard {
+            g.assert_no_errors();
+        }
+    }
+
+    // ─── 2D tests (C-1-2 new) ───────────────────────────────────────────
+
+    /// Run a 2D forward (real H×N → complex H×N spectrum) followed by
+    /// a 2D inverse (complex H×N → complex H×N with imag ≈ 0). Returns
+    /// the inverse output `.x` field, which should equal the input
+    /// modulo numerical drift.
+    fn run_round_trip_2d(
+        ctx: &GpuContext,
+        pass2d: &Fft2dPass,
+        twiddles: &wgpu::Buffer,
+        input_real: &[f32],
+        n: u32,
+    ) -> Vec<f32> {
+        let total_cells = (n * n) as usize;
+        assert_eq!(input_real.len(), total_cells, "input must be H×N=N×N");
+
+        // Buffer A: real input. Read by H-axis forward; rewritten by
+        // H-axis inverse (as complex, so 2× capacity needed).
+        let buf_a = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("2d round-trip buf_a (real/complex)"),
+            // 2 × f32 per cell to fit complex on the way back.
+            size: (total_cells * 2 * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        // Upload only the first N*N f32 (the real-input layout). The
+        // remaining slots are unused on the forward path.
+        ctx.queue
+            .write_buffer(&buf_a, 0, bytemuck::cast_slice(input_real));
+
+        // Buffer B: complex intermediate + final spectrum + inverse
+        // intermediate, all reused. Sized for complex.
+        let buf_b = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("2d round-trip buf_b (complex)"),
+            size: (total_cells * 2 * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        let params_fwd_h = pass2d
+            .h
+            .upload_params(ctx, FftParams::new(n, n, FftDirection::Forward));
+        let params_fwd_v = pass2d
+            .v
+            .upload_params(ctx, FftParams::new(n, n, FftDirection::Forward));
+        let params_inv_v = pass2d
+            .v
+            .upload_params(ctx, FftParams::new(n, n, FftDirection::Inverse));
+        let params_inv_h = pass2d
+            .h
+            .upload_params(ctx, FftParams::new(n, n, FftDirection::Inverse));
+
+        // Forward: A (real) → B (complex)  via H,  then B → A (complex) via V
+        let bg_h_fwd =
+            pass2d
+                .h
+                .make_bind_group(ctx, &buf_a, twiddles, &buf_b, &params_fwd_h);
+        let bg_v_fwd =
+            pass2d
+                .v
+                .make_bind_group(ctx, &buf_b, twiddles, &buf_a, &params_fwd_v);
+        // Inverse: A (complex) → B (complex) via V, then B → A (complex, imag≈0) via H
+        let bg_v_inv =
+            pass2d
+                .v
+                .make_bind_group(ctx, &buf_a, twiddles, &buf_b, &params_inv_v);
+        let bg_h_inv =
+            pass2d
+                .h
+                .make_bind_group(ctx, &buf_b, twiddles, &buf_a, &params_inv_h);
+
+        let mut enc = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("2d round-trip encoder"),
+            });
+        pass2d.h.record(&mut enc, &bg_h_fwd, n);
+        pass2d.v.record(&mut enc, &bg_v_fwd, n);
+        pass2d.v.record(&mut enc, &bg_v_inv, n);
+        pass2d.h.record(&mut enc, &bg_h_inv, n);
+        ctx.queue.submit([enc.finish()]);
+        ctx.device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .unwrap();
+
+        // Read back as complex; keep only the real part (.x of each
+        // vec2). After 2× forward + 2× inverse with each axis
+        // normalised by 1/N, the imag part should be < 1e-4.
+        let flat = readback_buffer::<f32>(ctx, &buf_a, total_cells * 2);
+        flat.chunks_exact(2).map(|c| c[0]).collect()
+    }
+
+    /// Run only the forward 2D, return the complex spectrum. Used by
+    /// the rustfft 2D comparison test.
+    fn run_forward_2d(
+        ctx: &GpuContext,
+        pass2d: &Fft2dPass,
+        twiddles: &wgpu::Buffer,
+        input_real: &[f32],
+        n: u32,
+    ) -> Vec<[f32; 2]> {
+        let total_cells = (n * n) as usize;
+        assert_eq!(input_real.len(), total_cells);
+
+        let buf_a = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("2d forward buf_a"),
+            size: (total_cells * 2 * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        ctx.queue
+            .write_buffer(&buf_a, 0, bytemuck::cast_slice(input_real));
+
+        let buf_b = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("2d forward buf_b"),
+            size: (total_cells * 2 * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        let params_fwd_h = pass2d
+            .h
+            .upload_params(ctx, FftParams::new(n, n, FftDirection::Forward));
+        let params_fwd_v = pass2d
+            .v
+            .upload_params(ctx, FftParams::new(n, n, FftDirection::Forward));
+
+        let bg_h_fwd =
+            pass2d
+                .h
+                .make_bind_group(ctx, &buf_a, twiddles, &buf_b, &params_fwd_h);
+        let bg_v_fwd =
+            pass2d
+                .v
+                .make_bind_group(ctx, &buf_b, twiddles, &buf_a, &params_fwd_v);
+
+        let mut enc = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("2d forward encoder"),
+            });
+        pass2d.h.record(&mut enc, &bg_h_fwd, n);
+        pass2d.v.record(&mut enc, &bg_v_fwd, n);
+        ctx.queue.submit([enc.finish()]);
+        ctx.device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .unwrap();
+
+        let flat = readback_buffer::<f32>(ctx, &buf_a, total_cells * 2);
+        flat.chunks_exact(2).map(|c| [c[0], c[1]]).collect()
+    }
+
+    fn cpu_reference_fft_2d(n: usize, input: &[f32]) -> Vec<[f32; 2]> {
+        // Row-by-row 1D, then column-by-column 1D — separable.
+        let mut planner = FftPlanner::<f32>::new();
+        let fft = planner.plan_fft_forward(n);
+
+        let mut buf: Vec<Complex32> = input.iter().map(|&v| Complex32::new(v, 0.0)).collect();
+
+        // H-axis rows
+        for row in 0..n {
+            let start = row * n;
+            fft.process(&mut buf[start..start + n]);
+        }
+        // V-axis columns (gather into temp, transform, scatter back)
+        let mut col_buf: Vec<Complex32> = vec![Complex32::new(0.0, 0.0); n];
+        for col in 0..n {
+            for r in 0..n {
+                col_buf[r] = buf[r * n + col];
+            }
+            fft.process(&mut col_buf);
+            for r in 0..n {
+                buf[r * n + col] = col_buf[r];
+            }
+        }
+
+        buf.iter().map(|c| [c.re, c.im]).collect()
+    }
+
+    /// 2D round-trip at N=256: forward → inverse → original input.
+    /// Both axes normalised at 1/N in the inverse, total factor 1/N²
+    /// matches rustfft's two-pass separable inverse.
+    #[test]
+    fn fft_2d_round_trip_n256() {
+        let (ctx, guard) = headless_ctx();
+        let pass2d = Fft2dPass::new(&ctx, 256);
+        let twiddles = precompute_twiddles_1d(&ctx, 256);
+
+        let mut rng = ChaCha8Rng::seed_from_u64(0xF7_2D_5C56);
+        let n: u32 = 256;
+        let input: Vec<f32> = (0..(n * n) as usize)
             .map(|_| rng.gen_range(-1.0_f32..1.0))
             .collect();
 
-        let gpu_spectrum = run_forward(&ctx, &pass, &twiddles, &input);
-
-        // rustfft inverse expects Complex32; rustfft does not include
-        // the 1/N normalisation, so we divide manually.
-        let mut planner = FftPlanner::<f32>::new();
-        let ifft = planner.plan_fft_inverse(FFT_N as usize);
-        let mut roundtrip: Vec<f32> = Vec::with_capacity(input.len());
-        for row_chunk in gpu_spectrum.chunks_exact(FFT_N as usize) {
-            let mut buf: Vec<Complex32> = row_chunk
-                .iter()
-                .map(|c| Complex32::new(c[0], c[1]))
-                .collect();
-            ifft.process(&mut buf);
-            let scale = 1.0_f32 / FFT_N as f32;
-            for c in &buf {
-                roundtrip.push(c.re * scale);
-            }
-        }
+        let roundtrip = run_round_trip_2d(&ctx, &pass2d, &twiddles, &input, n);
 
         let mut max_abs = 0.0_f32;
         for (i, (&r, &orig)) in roundtrip.iter().zip(input.iter()).enumerate() {
@@ -466,65 +770,191 @@ mod tests {
             max_abs = max_abs.max(abs_err);
             assert!(
                 abs_err < 1e-4,
-                "round-trip mismatch at idx {i}: roundtrip={r} orig={orig} abs={abs_err:.3e}"
+                "2D round-trip mismatch at idx {i}: roundtrip={r} orig={orig} abs={abs_err:.3e}"
             );
         }
-        eprintln!("[M6.C-1-1] fft_1d round-trip (rustfft inverse) : max_abs={max_abs:.3e}");
+        eprintln!("[M6.C-1-2] fft_2d round-trip N=256 : max_abs={max_abs:.3e}");
 
         if let Some(g) = &guard {
             g.assert_no_errors();
         }
     }
 
-    /// Impulse response: δ at idx=0 → spectrum is all (1, 0). This is
-    /// the simplest possible FFT sanity check, catching gross issues
-    /// like the wrong twiddle sign or a bit-reversal mismatch that
-    /// the random-input test might absorb into a "small" rel error.
-    ///
-    /// **Coverage caveat** (Round 1 review concern #3): for δ at
-    /// idx=0, every butterfly has p1=p2=p3=0, so the twiddle
-    /// multiplies are silently bypassed and a twiddle-buffer bug does
-    /// NOT trip this test. The C-1-1 development cycle hit exactly
-    /// this: the initial N/4-entry twiddle buffer passed impulse but
-    /// failed `fft_1d_matches_rustfft` — see `precompute_twiddles_1d`
-    /// rustdoc for the post-mortem. Treat impulse as a "shader
-    /// loads" sanity, not a correctness gate; correctness lives in
-    /// the random-vs-rustfft comparison.
-    ///
-    /// **Observed on M1 mini (2026-05-25)**: `max_abs = 0.0` (the
-    /// trivial sum/diff arithmetic of all-zero p1/p2/p3 cancels
-    /// exactly). Tolerance 1e-5 is purely defensive.
+    /// 2D round-trip at N=64 — smaller-grid sanity for the dynamic-N
+    /// pipeline-override path (different `WORKGROUP_X` from N=256).
     #[test]
-    fn fft_1d_impulse_response_is_all_ones() {
+    fn fft_2d_round_trip_n64() {
         let (ctx, guard) = headless_ctx();
-        let pass = FftPass::new(&ctx);
-        let twiddles = precompute_twiddles_1d(&ctx, FFT_N);
+        let pass2d = Fft2dPass::new(&ctx, 64);
+        let twiddles = precompute_twiddles_1d(&ctx, 64);
 
-        let mut input = vec![0.0_f32; FFT_N as usize];
-        input[0] = 1.0;
+        let mut rng = ChaCha8Rng::seed_from_u64(0xF7_2D_5C64);
+        let n: u32 = 64;
+        let input: Vec<f32> = (0..(n * n) as usize)
+            .map(|_| rng.gen_range(-1.0_f32..1.0))
+            .collect();
 
-        let gpu = run_forward(&ctx, &pass, &twiddles, &input);
-        assert_eq!(gpu.len(), FFT_N as usize);
+        let roundtrip = run_round_trip_2d(&ctx, &pass2d, &twiddles, &input, n);
 
-        // Every bin should be (1, 0). f32 round-trip through cos/sin
-        // and 4 stages of accumulation gives ulp-scale drift; 1e-5
-        // is a generous bound.
         let mut max_abs = 0.0_f32;
-        for (i, c) in gpu.iter().enumerate() {
-            let abs_re = (c[0] - 1.0).abs();
-            let abs_im = c[1].abs();
-            max_abs = max_abs.max(abs_re.max(abs_im));
+        for (i, (&r, &orig)) in roundtrip.iter().zip(input.iter()).enumerate() {
+            let abs_err = (r - orig).abs();
+            max_abs = max_abs.max(abs_err);
             assert!(
-                abs_re < 1e-5 && abs_im < 1e-5,
-                "impulse bin {i}: gpu=({:e}, {:e}), expected (1, 0)",
-                c[0],
-                c[1]
+                abs_err < 1e-4,
+                "2D round-trip mismatch at idx {i}: roundtrip={r} orig={orig} abs={abs_err:.3e}"
             );
         }
-        eprintln!("[M6.C-1-1] fft_1d impulse → all-ones : max_abs={max_abs:.3e}");
+        eprintln!("[M6.C-1-2] fft_2d round-trip N=64 : max_abs={max_abs:.3e}");
 
         if let Some(g) = &guard {
             g.assert_no_errors();
         }
+    }
+
+    /// 2D forward output matches rustfft's separable two-pass output.
+    /// This is the canonical correctness gate; the round-trip tests
+    /// catch sign-convention bugs but cannot distinguish "GPU and
+    /// CPU agree on the wrong answer" from "both are right".
+    ///
+    /// Parametrised over `SUPPORTED_N` so the dynamic-N path
+    /// (pipeline-override `WORKGROUP_X`) and the `digit_reverse_4_dynamic`
+    /// log₄(n)-digit loop are exercised at both N=64 and N=256.
+    /// Round 1 review M1: without the N=64 leg, a hypothetical
+    /// off-by-one in either the digit reversal or the stage loop
+    /// would be absorbed by round-trip alone and miss the rustfft
+    /// witness.
+    fn run_forward_vs_rustfft_2d(seed: u64, n: u32) -> (f32, f32) {
+        let (ctx, guard) = headless_ctx();
+        let pass2d = Fft2dPass::new(&ctx, n);
+        let twiddles = precompute_twiddles_1d(&ctx, n);
+
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let input: Vec<f32> = (0..(n * n) as usize)
+            .map(|_| rng.gen_range(-1.0_f32..1.0))
+            .collect();
+
+        let gpu = run_forward_2d(&ctx, &pass2d, &twiddles, &input, n);
+        let cpu = cpu_reference_fft_2d(n as usize, &input);
+
+        let mut max_abs = 0.0_f32;
+        let mut max_rel = 0.0_f32;
+        for (i, (g, c)) in gpu.iter().zip(cpu.iter()).enumerate() {
+            let abs_re = (g[0] - c[0]).abs();
+            let abs_im = (g[1] - c[1]).abs();
+            let mag = (c[0] * c[0] + c[1] * c[1]).sqrt().max(1e-6);
+            let rel = abs_re.max(abs_im) / mag;
+            max_abs = max_abs.max(abs_re.max(abs_im));
+            max_rel = max_rel.max(rel);
+            assert!(
+                rel < 1e-3 || abs_re.max(abs_im) < 1e-4,
+                "2D bin {i} (N={n}): gpu=({:e},{:e}) cpu=({:e},{:e}) rel={rel:.3e}",
+                g[0],
+                g[1],
+                c[0],
+                c[1]
+            );
+        }
+
+        if let Some(g) = &guard {
+            g.assert_no_errors();
+        }
+        (max_abs, max_rel)
+    }
+
+    #[test]
+    fn fft_2d_forward_matches_rustfft_n256() {
+        let (max_abs, max_rel) = run_forward_vs_rustfft_2d(0xF7_2D_F256, 256);
+        eprintln!(
+            "[M6.C-1-2] fft_2d vs rustfft N=256 : max_abs={max_abs:.3e}  max_rel={max_rel:.3e}"
+        );
+    }
+
+    /// Round 1 review M1: dynamic-N path witness at N=64.
+    #[test]
+    fn fft_2d_forward_matches_rustfft_n64() {
+        let (max_abs, max_rel) = run_forward_vs_rustfft_2d(0xF7_2D_F064, 64);
+        eprintln!(
+            "[M6.C-1-2] fft_2d vs rustfft N=64  : max_abs={max_abs:.3e}  max_rel={max_rel:.3e}"
+        );
+    }
+
+    /// Round 1 review M2: 1D GPU forward + GPU inverse round-trip at
+    /// N=64 — the dynamic-N path needs an inverse witness too, not
+    /// just at N=256 (forward+inverse separately could each be wrong
+    /// in cancelling ways the N=256 test happens to miss).
+    fn run_1d_gpu_round_trip(seed: u64, n: u32) -> f32 {
+        let (ctx, guard) = headless_ctx();
+        let pass = FftPass::new_h(&ctx, n);
+        let twiddles = precompute_twiddles_1d(&ctx, n);
+
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let input: Vec<f32> = (0..n as usize)
+            .map(|_| rng.gen_range(-1.0_f32..1.0))
+            .collect();
+
+        let buf_a = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("1d gpu round-trip A (parametric)"),
+            size: (n as usize * 2 * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        ctx.queue
+            .write_buffer(&buf_a, 0, bytemuck::cast_slice(&input));
+
+        let buf_b = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("1d gpu round-trip B (parametric)"),
+            size: (n as usize * 2 * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        let params_fwd = pass.upload_params(&ctx, FftParams::new(n, 1, FftDirection::Forward));
+        let params_inv = pass.upload_params(&ctx, FftParams::new(n, 1, FftDirection::Inverse));
+        let bg_fwd = pass.make_bind_group(&ctx, &buf_a, &twiddles, &buf_b, &params_fwd);
+        let bg_inv = pass.make_bind_group(&ctx, &buf_b, &twiddles, &buf_a, &params_inv);
+
+        let mut enc = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("1d gpu round-trip encoder (parametric)"),
+            });
+        pass.record(&mut enc, &bg_fwd, 1);
+        pass.record(&mut enc, &bg_inv, 1);
+        ctx.queue.submit([enc.finish()]);
+        ctx.device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .unwrap();
+
+        let flat = readback_buffer::<f32>(&ctx, &buf_a, n as usize * 2);
+        let recovered: Vec<f32> = flat.chunks_exact(2).map(|c| c[0]).collect();
+
+        let mut max_abs = 0.0_f32;
+        for (i, (&r, &orig)) in recovered.iter().zip(input.iter()).enumerate() {
+            let abs_err = (r - orig).abs();
+            max_abs = max_abs.max(abs_err);
+            assert!(
+                abs_err < 1e-4,
+                "1D GPU round-trip (N={n}) mismatch at idx {i}: \
+                 recovered={r} orig={orig} abs={abs_err:.3e}"
+            );
+        }
+        if let Some(g) = &guard {
+            g.assert_no_errors();
+        }
+        max_abs
+    }
+
+    #[test]
+    fn fft_1d_gpu_inverse_round_trip_n64() {
+        let max_abs = run_1d_gpu_round_trip(0xFF7_1D_64, 64);
+        eprintln!("[M6.C-1-2] fft_1d GPU round-trip N=64  : max_abs={max_abs:.3e}");
     }
 }
