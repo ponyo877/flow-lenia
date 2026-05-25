@@ -20,25 +20,27 @@ use crate::GpuContext;
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
-/// Mirror of WGSL `struct SmParams`. The two `_pad` u32 fields make
-/// the struct 16-byte aligned per WGSL uniform alignment rules.
+/// Mirror of WGSL `struct SmParams`. `_pad0` rounds to 16-byte
+/// uniform alignment.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct SpectralMultiplyParams {
     pub n: u32,
     pub k: u32,
+    /// Channel count `C` — the layout of `input_spectra` is
+    /// `[(c * N + row) * N + col]` for `c ∈ [0, C)`.
+    pub c: u32,
     pub _pad0: u32,
-    pub _pad1: u32,
 }
 
 impl SpectralMultiplyParams {
     #[must_use]
-    pub fn new(n: u32, k: u32) -> Self {
+    pub fn new(n: u32, k: u32, c: u32) -> Self {
         Self {
             n,
             k,
+            c,
             _pad0: 0,
-            _pad1: 0,
         }
     }
 }
@@ -69,6 +71,7 @@ impl SpectralMultiplyPass {
                 .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                     label: Some("spectral_multiply bind group layout"),
                     entries: &[
+                        // 0: input_spectra (C × N² complex)
                         wgpu::BindGroupLayoutEntry {
                             binding: 0,
                             visibility: wgpu::ShaderStages::COMPUTE,
@@ -79,6 +82,7 @@ impl SpectralMultiplyPass {
                             },
                             count: None,
                         },
+                        // 1: kernel_fft (K × N² complex)
                         wgpu::BindGroupLayoutEntry {
                             binding: 1,
                             visibility: wgpu::ShaderStages::COMPUTE,
@@ -89,6 +93,7 @@ impl SpectralMultiplyPass {
                             },
                             count: None,
                         },
+                        // 2: output_spectra (K × N² complex)
                         wgpu::BindGroupLayoutEntry {
                             binding: 2,
                             visibility: wgpu::ShaderStages::COMPUTE,
@@ -99,8 +104,20 @@ impl SpectralMultiplyPass {
                             },
                             count: None,
                         },
+                        // 3: kernel_routing (K × u32 = source_channel)
                         wgpu::BindGroupLayoutEntry {
                             binding: 3,
+                            visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                        // 4: params (SmParams uniform)
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 4,
                             visibility: wgpu::ShaderStages::COMPUTE,
                             ty: wgpu::BindingType::Buffer {
                                 ty: wgpu::BufferBindingType::Uniform,
@@ -137,14 +154,17 @@ impl SpectralMultiplyPass {
         }
     }
 
-    /// Assemble a bind group.
+    /// Assemble a bind group. M6.C-1-5-a multi-channel signature:
+    /// `input_spectra` is `C × N²` complex (channel-major concat),
+    /// `kernel_routing` is `K × u32` (per-kernel source_channel).
     #[must_use]
     pub fn make_bind_group(
         &self,
         ctx: &GpuContext,
-        input_spectrum: &wgpu::Buffer,
+        input_spectra: &wgpu::Buffer,
         kernel_fft: &wgpu::Buffer,
         output_spectra: &wgpu::Buffer,
+        kernel_routing: &wgpu::Buffer,
         params: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -153,7 +173,7 @@ impl SpectralMultiplyPass {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: input_spectrum.as_entire_binding(),
+                    resource: input_spectra.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -165,10 +185,27 @@ impl SpectralMultiplyPass {
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
+                    resource: kernel_routing.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
                     resource: params.as_entire_binding(),
                 },
             ],
         })
+    }
+
+    /// Upload a `[u32]` kernel-routing array (`K` entries, each the
+    /// source-channel index of kernel `k`) as a storage buffer. For
+    /// the C=1 case every entry is 0.
+    #[must_use]
+    pub fn upload_kernel_routing(ctx: &GpuContext, routing: &[u32]) -> wgpu::Buffer {
+        ctx.device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("spectral_multiply kernel_routing"),
+                contents: bytemuck::cast_slice(routing),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            })
     }
 
     /// Dispatch enough workgroups to cover `n * n * k` complex cells.
@@ -262,8 +299,19 @@ mod tests {
             mapped_at_creation: false,
         });
         let params_buf =
-            SpectralMultiplyPass::upload_params(&ctx, SpectralMultiplyParams::new(n, k));
-        let bg = pass.make_bind_group(&ctx, &input_buf, &kernel_buf, &output_buf, &params_buf);
+            SpectralMultiplyPass::upload_params(&ctx, SpectralMultiplyParams::new(n, k, 1));
+        // M6.C-1-5-a: kernel_routing all-0 routes every kernel to
+        // channel 0 (degenerate C=1 case).
+        let routing: Vec<u32> = vec![0; k as usize];
+        let routing_buf = SpectralMultiplyPass::upload_kernel_routing(&ctx, &routing);
+        let bg = pass.make_bind_group(
+            &ctx,
+            &input_buf,
+            &kernel_buf,
+            &output_buf,
+            &routing_buf,
+            &params_buf,
+        );
 
         let mut enc = ctx
             .device
@@ -394,7 +442,10 @@ mod tests {
             .h
             .upload_params(ctx, FftParams::new(n, n, FftDirection::Inverse));
         let sm_params_buf =
-            SpectralMultiplyPass::upload_params(ctx, SpectralMultiplyParams::new(n, k));
+            SpectralMultiplyPass::upload_params(ctx, SpectralMultiplyParams::new(n, k, 1));
+        // M6.C-1-5-a: C=1 degenerate routing.
+        let routing: Vec<u32> = vec![0; k as usize];
+        let routing_buf = SpectralMultiplyPass::upload_kernel_routing(ctx, &routing);
 
         let bg_h_fwd =
             fft2d
@@ -404,8 +455,14 @@ mod tests {
             fft2d
                 .v
                 .make_bind_group(ctx, &buf_b, twiddles, &buf_a, &params_v_fwd);
-        let bg_sm =
-            sm_pass.make_bind_group(ctx, &buf_a, &kernel_fft.buffer, &buf_sm_out, &sm_params_buf);
+        let bg_sm = sm_pass.make_bind_group(
+            ctx,
+            &buf_a,
+            &kernel_fft.buffer,
+            &buf_sm_out,
+            &routing_buf,
+            &sm_params_buf,
+        );
 
         // Forward path (single encoder, single submit covers staging
         // copy + H + V + SM).

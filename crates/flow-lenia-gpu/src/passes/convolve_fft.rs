@@ -14,26 +14,31 @@
 //!    `affinity_growth` pass sees the same `pre_g` binding contract
 //!    as the direct path.
 //!
-//! ## C=1 limitation (M6.C-1-4 scope, deferred to C-1-5+ for full)
+//! ## Multi-channel (C>=1) support — M6.C-1-5-a
 //!
-//! Every kernel is assumed to read channel 0 of the input. The
-//! existing direct [`ConvolvePass`] WGSL inspects `meta_arr[ki]
-//! .source_channel` and reads the appropriate channel of `a_in`
-//! per kernel. Mirroring that on the FFT side would require running
-//! `C` forward FFTs (one per input channel) and routing each
-//! kernel's spectral multiply to the right channel-spectrum.
-//! That is real work but mechanical; it is deferred so C-1-4 can
-//! complete its primary deliverable (FFT vs direct A/B measurement).
+//! As of C-1-5-a `ConvolveFftPass` supports `C >= 1` input channels
+//! with **per-kernel source-channel routing** (mirroring
+//! `meta_arr[ki].source_channel` from the direct `convolve.wgsl`
+//! path). The implementation:
 //!
-//! **Where the early-exit gate runs** (Round 1 review M3 correction):
-//! the standard `tests/m1_regression_gpu.rs` is **C=3**, so it is
-//! NOT the early-exit gate's host. C-1-4-b will need either a
-//! dedicated C=1 benchmark or to defer FFT-mode integration until
-//! the multi-channel work lands. `tests/diagnose_divergence.rs`
-//! (M6.A.4.5 grid sweep) is the existing C=1 testbed and is the
-//! natural host for the gate, but the perf measurement path will
-//! need to be set up explicitly in C-1-4-b's scope-guardian
-//! consultation.
+//! 1. Runs `C` forward 2D FFTs (one per input channel), staging
+//!    each into a per-channel scratch buffer and copying into a
+//!    contiguous `channel_spectra` storage buffer
+//!    (`C × N² × complex`, channel-major).
+//! 2. Single spectral-multiply dispatch with the new WGSL
+//!    `kernel_routing` binding telling each (k, cell) thread which
+//!    channel's spectrum to read.
+//! 3. K per-kernel inverse 2D FFTs + layout transpose as before.
+//!
+//! **Per-channel forward overhead**: at C=3 the forward path now
+//! issues 3 × (forward_2d_with_scratch + copy) instead of 1, so
+//! end-to-end overhead scales with C. The C-1-4-b 9.018× C=1 gate
+//! number does NOT directly extrapolate; C-1-5-b's perf re-anchor
+//! will report the C=3 ratio.
+//!
+//! **C-1-4-b → C-1-5-a migration**: the previous C=1-only assertion
+//! in `GpuStepPipeline::new_with_mode` is replaced by a `C >= 1`
+//! check (the FFT path now matches direct on all channel counts).
 //!
 //! ## Scope-guardian Option C (struct separation)
 //!
@@ -75,6 +80,7 @@ use crate::passes::fft::{precompute_twiddles_1d, Fft2dPass};
 use crate::passes::spectral_multiply::{SpectralMultiplyParams, SpectralMultiplyPass};
 use crate::GpuContext;
 use bytemuck::{Pod, Zeroable};
+use flow_lenia_core::params::KernelParams;
 use wgpu::util::DeviceExt;
 
 /// Mirror of WGSL `struct PreGParams`. 16-byte aligned for uniform.
@@ -184,18 +190,39 @@ impl FftToPreGPass {
 
 /// FFT-based convolve pass owning all sub-passes and per-step
 /// scratch. Per-step `record(...)` appends dispatches to the
-/// caller's encoder; no submits, no polls, no allocations.
+/// caller's encoder; no submits, no polls. Per-call uniform / bind
+/// group allocations are honestly framed in the helper rustdocs
+/// (see fft.rs `forward_2d_with_scratch`).
+///
+/// **Multi-channel (C>=1)** as of M6.C-1-5-a: owns C-sized scratch
+/// for per-channel forward FFTs + the kernel-routing storage buffer
+/// + the channel-major `channel_spectra` buffer that the
+/// spectral-multiply pass reads.
 pub struct ConvolveFftPass {
     pub n: u32,
     pub k: u32,
+    pub c: u32,
     pub fft2d: Fft2dPass,
     pub sm_pass: SpectralMultiplyPass,
     pub layout_pass: FftToPreGPass,
     pub twiddles: wgpu::Buffer,
-    /// `n²` complex scratch — H/V FFT intermediate.
+    /// `n²` complex scratch — H/V FFT intermediate (shared across
+    /// all C per-channel forward FFTs and all K per-kernel inverse
+    /// FFTs; consecutive dispatches use wgpu's implicit barriers).
     pub scratch_complex: wgpu::Buffer,
-    /// `n²` complex — input spectrum (output of forward 2D).
-    pub spectrum_a: wgpu::Buffer,
+    /// `n²` complex — per-channel forward 2D FFT output staging
+    /// (one channel at a time, then copied into `channel_spectra`).
+    /// Also reused as the per-kernel inverse 2D FFT H-axis output
+    /// (step 3 of `record`, after step 2 SM has consumed
+    /// `channel_spectra`).
+    pub spectrum_staging: wgpu::Buffer,
+    /// `C × n²` complex — channel-major concatenation of per-channel
+    /// forward-FFT outputs. SM binding 0 reads this.
+    pub channel_spectra: wgpu::Buffer,
+    /// `K × u32` — per-kernel source-channel routing
+    /// (`kernel_routing[k] = source_channel ∈ [0, C)`). Built once
+    /// in `new(...)` from `KernelParams`.
+    pub kernel_routing_buf: wgpu::Buffer,
     /// `K × n²` complex — output of spectral multiply (K spectra).
     pub k_spectra: wgpu::Buffer,
     /// `n²` complex — copy target for one kernel's spectrum
@@ -204,7 +231,7 @@ pub struct ConvolveFftPass {
     /// `K × n²` complex — concatenated per-kernel inverse FFT
     /// outputs, read by the layout transpose pass.
     pub k_complex_out: wgpu::Buffer,
-    /// SM params uniform (n, k).
+    /// SM params uniform (n, k, c).
     pub sm_params_buf: wgpu::Buffer,
     /// Layout-transpose params uniform (n, k).
     pub layout_params_buf: wgpu::Buffer,
@@ -212,17 +239,50 @@ pub struct ConvolveFftPass {
 
 impl ConvolveFftPass {
     /// Build all sub-passes and per-step scratch for a fixed
-    /// `(n, num_kernels)` shape. The `twiddles` buffer is also owned
-    /// here so the caller never has to wire it in.
+    /// `(n, channels, kernel_params)` shape. The `twiddles` buffer
+    /// is also owned here, plus the kernel-routing storage buffer
+    /// (derived from `kernel_params[k].c0` for each kernel).
+    ///
+    /// `kernel_params.kernels.len()` becomes the runtime `K`.
     #[must_use]
-    pub fn new(ctx: &GpuContext, n: u32, num_kernels: u32) -> Self {
-        assert!(num_kernels >= 1, "ConvolveFftPass requires K >= 1 (got {num_kernels})");
+    pub fn new(
+        ctx: &GpuContext,
+        n: u32,
+        channels: u32,
+        kernel_params: &KernelParams,
+    ) -> Self {
+        let num_kernels = kernel_params.kernels.len() as u32;
+        assert!(
+            num_kernels >= 1,
+            "ConvolveFftPass requires K >= 1 (got {num_kernels})"
+        );
+        assert!(
+            channels >= 1,
+            "ConvolveFftPass requires C >= 1 (got {channels})"
+        );
         let cells = (n * n) as usize;
         let k = num_kernels;
+        let c = channels;
         let fft2d = Fft2dPass::new(ctx, n);
         let sm_pass = SpectralMultiplyPass::new(ctx);
         let layout_pass = FftToPreGPass::new(ctx);
         let twiddles = precompute_twiddles_1d(ctx, n);
+
+        // Per-kernel source-channel routing derived from KernelEntry.c0
+        // (matches direct convolve.wgsl's `meta_arr[ki].source_channel`).
+        let routing: Vec<u32> = kernel_params
+            .kernels
+            .iter()
+            .map(|e| {
+                assert!(
+                    (e.c0 as u32) < c,
+                    "KernelEntry.c0={} exceeds channels={c}",
+                    e.c0
+                );
+                e.c0 as u32
+            })
+            .collect();
+        let kernel_routing_buf = SpectralMultiplyPass::upload_kernel_routing(ctx, &routing);
 
         let scratch_complex = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ConvolveFftPass scratch complex (H/V intermediate)"),
@@ -230,13 +290,20 @@ impl ConvolveFftPass {
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
-        let spectrum_a = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("ConvolveFftPass input spectrum + per-kernel inverse H-output"),
-            // STORAGE for FFT binding + COPY_SRC because we reuse this
-            // buffer as the per-kernel inverse 2D H-axis output and
-            // then copy it into the right slice of k_complex_out.
+        let spectrum_staging = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ConvolveFftPass per-channel-forward + per-kernel-inverse staging"),
+            // STORAGE for FFT binding + COPY_SRC because we use this
+            // as the source for per-channel concat into channel_spectra
+            // AND as the per-kernel inverse 2D H-axis output that
+            // gets copied into the k_complex_out slice.
             size: (cells * 2 * 4) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let channel_spectra = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ConvolveFftPass channel_spectra (C × N² complex, SM input)"),
+            size: (cells * c as usize * 2 * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let k_spectra = ctx.device.create_buffer(&wgpu::BufferDescriptor {
@@ -258,7 +325,7 @@ impl ConvolveFftPass {
             mapped_at_creation: false,
         });
         let sm_params_buf =
-            SpectralMultiplyPass::upload_params(ctx, SpectralMultiplyParams::new(n, k));
+            SpectralMultiplyPass::upload_params(ctx, SpectralMultiplyParams::new(n, k, c));
         let layout_params_buf = ctx
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -270,12 +337,15 @@ impl ConvolveFftPass {
         Self {
             n,
             k,
+            c,
             fft2d,
             sm_pass,
             layout_pass,
             twiddles,
             scratch_complex,
-            spectrum_a,
+            spectrum_staging,
+            channel_spectra,
+            kernel_routing_buf,
             k_spectra,
             inv_in,
             k_complex_out,
@@ -288,15 +358,18 @@ impl ConvolveFftPass {
     ///
     /// - `input_a`: real activation, channel-major flat
     ///   `a_in[c * H * W + y * W + x]` (= existing `ConvolvePass`
-    ///   input layout). **C=1 only**: this implementation reads
-    ///   channel 0 (the first `n²` reals). Multi-channel +
-    ///   per-kernel source-channel routing is deferred.
+    ///   input layout). Each channel slice is `n²` reals.
+    ///   M6.C-1-5-a multi-channel: all `C` channels are forward-FFT'd.
     /// - `kernel_fft`: K pre-computed kernel FFTs as built by
     ///   `passes::kernel_fft::precompute_kernel_ffts` (K × N × N
     ///   complex, K-major).
     /// - `pre_g_out`: real, cell-major
     ///   `pre_g[y * W * K + x * K + ki]` (= existing `ConvolvePass`
     ///   output layout — drop-in for `affinity_growth`).
+    ///
+    /// Per-kernel source-channel routing comes from
+    /// `self.kernel_routing_buf`, built once in `new(...)` from the
+    /// passed `KernelParams[k].c0`.
     ///
     /// Submits, polls, and bind-group identities are the caller's
     /// responsibility.
@@ -310,28 +383,63 @@ impl ConvolveFftPass {
     ) {
         let n = self.n;
         let k = self.k;
+        let c = self.c;
         let cells = (n * n) as usize;
 
-        // 1. Forward 2D FFT of input_a (channel 0) → spectrum_a.
-        //    H-axis reads input_a as `array<f32>` and the real-input
-        //    branch picks index `row_base + i` (first n² f32 of
-        //    input_a, which is exactly channel 0's data under the
-        //    channel-major flat layout).
-        self.fft2d.forward_2d_with_scratch(
-            ctx,
-            encoder,
-            &self.twiddles,
-            input_a,
-            &self.scratch_complex,
-            &self.spectrum_a,
-        );
+        // 1. Per-channel forward 2D FFT. For each channel c, the
+        //    H-axis shader reads input_a as `array<f32>` and the
+        //    real-input branch picks index `row_base + i`. To select
+        //    channel c we need the H-axis input binding to start at
+        //    byte offset `c * cells * 4` of input_a. We do this via
+        //    a per-channel bind group with `BufferBinding{ offset,
+        //    size }` rather than copying — `forward_2d_with_scratch`
+        //    however takes a plain `&Buffer` for the input, so we
+        //    instead copy the channel-c slice into the lower half
+        //    of `spectrum_staging` (which is bound as the FFT input
+        //    via `forward_2d_with_scratch`) — no, that conflicts with
+        //    spectrum_staging's role as FFT output here. Cleanest:
+        //    forward 2D into `spectrum_staging` from a per-channel
+        //    `BufferBinding` slice of input_a. We synthesize that
+        //    via copy_buffer_to_buffer of the slice into `inv_in`
+        //    (sized n² complex = n² × 8 bytes; the lower n² × 4
+        //    bytes hold the real channel slice the H-axis forward
+        //    reads). After forward, copy spectrum_staging into the
+        //    c-th slice of channel_spectra.
+        for ch in 0..c {
+            let ch_offset_bytes = (ch as u64) * (cells as u64) * 4;
+            encoder.copy_buffer_to_buffer(
+                input_a,
+                ch_offset_bytes,
+                &self.inv_in,
+                0,
+                (cells * 4) as u64,
+            );
+            self.fft2d.forward_2d_with_scratch(
+                ctx,
+                encoder,
+                &self.twiddles,
+                &self.inv_in,
+                &self.scratch_complex,
+                &self.spectrum_staging,
+            );
+            let out_offset_bytes = (ch as u64) * (cells as u64) * 8;
+            encoder.copy_buffer_to_buffer(
+                &self.spectrum_staging,
+                0,
+                &self.channel_spectra,
+                out_offset_bytes,
+                (cells * 8) as u64,
+            );
+        }
 
-        // 2. Spectral multiply: spectrum_a × kernel_fft → k_spectra.
+        // 2. Spectral multiply: channel_spectra × kernel_fft → k_spectra
+        //    with per-kernel source_channel routing.
         let bg_sm = self.sm_pass.make_bind_group(
             ctx,
-            &self.spectrum_a,
+            &self.channel_spectra,
             kernel_fft,
             &self.k_spectra,
+            &self.kernel_routing_buf,
             &self.sm_params_buf,
         );
         self.sm_pass.record(encoder, &bg_sm, n, k);
@@ -374,10 +482,10 @@ impl ConvolveFftPass {
                 &self.twiddles,
                 &self.inv_in,
                 &self.scratch_complex,
-                &self.spectrum_a,
+                &self.spectrum_staging,
             );
             encoder.copy_buffer_to_buffer(
-                &self.spectrum_a,
+                &self.spectrum_staging,
                 0,
                 &self.k_complex_out,
                 slice_offset,
@@ -466,7 +574,7 @@ mod tests {
             kernels: entries.clone(),
         };
 
-        let pass = ConvolveFftPass::new(&ctx, n, k);
+        let pass = ConvolveFftPass::new(&ctx, n, 1, &params);
         let kernel_fft =
             precompute_kernel_ffts(&ctx, &params, n, &pass.fft2d, &pass.twiddles);
         assert_eq!(kernel_fft.k, k);

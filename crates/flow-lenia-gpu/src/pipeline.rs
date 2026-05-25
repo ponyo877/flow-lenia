@@ -159,11 +159,11 @@ impl GpuStepPipeline {
         convolve_mode: ConvolveMode,
     ) -> Self {
         if convolve_mode == ConvolveMode::Fft {
-            assert_eq!(
-                cfg.channels, 1,
-                "ConvolveMode::Fft requires cfg.channels == 1 in M6.C-1-4-b \
-                 (got {}); multi-channel + per-kernel source-channel routing \
-                 is C-1-5 candidate, see ConvolveFftPass module rustdoc.",
+            // M6.C-1-5-a: channels >= 1 now supported (per-kernel
+            // source_channel routing via ConvolveFftPass kernel_routing_buf).
+            assert!(
+                cfg.channels >= 1,
+                "ConvolveMode::Fft requires cfg.channels >= 1 (got {})",
                 cfg.channels
             );
             assert!(
@@ -329,7 +329,7 @@ impl GpuStepPipeline {
             ConvolveMode::Direct => (None, None),
             ConvolveMode::Fft => {
                 let n = cfg.grid_width;
-                let fft = ConvolveFftPass::new(ctx, n, kernel_buffers.count);
+                let fft = ConvolveFftPass::new(ctx, n, cfg.channels, kernel_params);
                 let kfft =
                     precompute_kernel_ffts(ctx, kernel_params, n, &fft.fft2d, &fft.twiddles);
                 (Some(fft), Some(kfft))
@@ -765,32 +765,89 @@ mod tests {
         }
     }
 
-    /// M6.C-1-4-b: ConvolveMode::Fft must reject `cfg.channels > 1`
-    /// at construction (deferred to C-1-5+ candidate).
-    /// **grid=64** so the supported-grid assert cannot fire first
-    /// (Round 1 review S-3: orthogonal test, isolates the channel
-    /// guard specifically).
+    /// M6.C-1-5-a: Direct mode vs FFT mode at **C=3** N=64 K=10
+    /// Torus, 5-step short horizon. multi-channel + per-kernel
+    /// source_channel routing が direct と一致を確認。
+    /// **chaos amplification** は C=3 で C=1 よりさらに大きい (M2.8
+    /// finding)、Layer 3 A.4.5 tiered tolerance g64 = 5e-4 を採用、
+    /// C-1-6 long-horizon measurement で sustainability 確認。
     #[test]
-    #[should_panic(expected = "ConvolveMode::Fft requires cfg.channels == 1")]
-    fn gpu_pipeline_fft_mode_rejects_multi_channel() {
-        let (ctx, _guard) = headless_ctx();
-        let mut cfg = small_cfg(3, false, BorderMode::Torus);
-        cfg.grid_width = 64;
-        cfg.grid_height = 64;
-        let kernel_params = FlowLeniaSimulator::new(cfg, 0).kernel_params().clone();
-        let initial_a = FlowLeniaSimulator::new(cfg, 0).activation().clone();
-        let _ = GpuStepPipeline::new_with_mode(
+    fn gpu_pipeline_fft_mode_matches_direct_n64_c3_short() {
+        let (ctx, guard) = headless_ctx();
+        let cfg = FlowLeniaConfig {
+            grid_width: 64,
+            grid_height: 64,
+            channels: 3,
+            dt: 0.2,
+            sigma: 0.65,
+            n: 2.0,
+            beta_a: 2.0,
+            dd: 5,
+            num_kernels: 10,
+            paper_strict: false,
+            border: BorderMode::Torus,
+            mix_rule: MixRule::Stochastic,
+        };
+        let seed = 0x4F_FE_64_C3_u64;
+        let cpu_init = FlowLeniaSimulator::new(cfg, seed);
+        let initial_a = cpu_init.activation().clone();
+        let kernel_params = cpu_init.kernel_params().clone();
+
+        let mut direct = GpuStepPipeline::new_with_mode(
+            &ctx,
+            &cfg,
+            &kernel_params,
+            &initial_a,
+            ConvolveMode::Direct,
+        );
+        let mut fft = GpuStepPipeline::new_with_mode(
             &ctx,
             &cfg,
             &kernel_params,
             &initial_a,
             ConvolveMode::Fft,
         );
+
+        let n_steps: u32 = 5;
+        direct.run_steps(&ctx, n_steps);
+        fft.run_steps(&ctx, n_steps);
+
+        let direct_a = direct.readback_activation(&ctx);
+        let fft_a = fft.readback_activation(&ctx);
+
+        let mut max_abs = 0.0_f32;
+        let mut max_rel = 0.0_f32;
+        for ((y, x, ci), &d) in direct_a.indexed_iter() {
+            let f = fft_a[[y, x, ci]];
+            let abs_err = (d - f).abs();
+            let rel_err = abs_err / d.abs().max(1e-6);
+            max_abs = max_abs.max(abs_err);
+            max_rel = max_rel.max(rel_err);
+            assert!(
+                rel_err < 5e-4 || abs_err < 1e-5,
+                "({y}, {x}, c={ci}) after {n_steps} steps C=3: direct={d} fft={f} \
+                 abs={abs_err:.3e} rel={rel_err:.3e}"
+            );
+        }
+        eprintln!(
+            "[M6.C-1-5-a] pipeline direct vs fft N=64 C=3 K=10 Torus {n_steps}-step : \
+             max_abs={max_abs:.3e}  max_rel={max_rel:.3e}"
+        );
+
+        if let Some(g) = &guard {
+            g.assert_no_errors();
+        }
     }
+
+    // M6.C-1-4-b の gpu_pipeline_fft_mode_rejects_multi_channel は
+    // M6.C-1-5-a で multi-channel 対応により obsolete、削除済。
+    // C=3 + grid=64 で FFT mode は正常に構築・動作するようになった
+    // (gpu_pipeline_fft_mode_matches_direct_n64_c3_short が新規 coverage)。
 
     /// M6.C-1-4-b: ConvolveMode::Fft must reject unsupported grid
     /// sizes (only {64, 256} pass; 32 / 128 / 512 are mixed-radix,
     /// deferred to C-1-5+).
+    /// **C=1 base cfg** to isolate the grid assert.
     #[test]
     #[should_panic(expected = "ConvolveMode::Fft requires cfg.grid_width")]
     fn gpu_pipeline_fft_mode_rejects_unsupported_grid() {
