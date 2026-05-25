@@ -29,8 +29,11 @@ use crate::{
     passes::{
         affinity_growth::{upload_constant_weights, AffinityGrowthPass, GpuConstantWeights},
         convolve::ConvolvePass,
+        convolve_fft::ConvolveFftPass,
+        fft::{is_supported_n, SUPPORTED_N},
         flow::FlowPass,
         gradient::GradientPass,
+        kernel_fft::{precompute_kernel_ffts, KernelFftBuffers},
         reintegrate::ReintegratePass,
     },
     GpuContext,
@@ -38,6 +41,28 @@ use crate::{
 use bytemuck::cast_slice;
 use flow_lenia_core::{config::FlowLeniaConfig, params::KernelParams, state::ActivationField};
 use wgpu::util::DeviceExt;
+
+/// Which convolution algorithm `GpuStepPipeline` uses per step.
+/// Default is `Direct` so existing callers (`flow-lenia-app`,
+/// `flow-lenia-web`, all M2.x / M4.x tests) are unaffected by the
+/// FFT-mode addition.
+///
+/// **M6.C-1-4-b limitation**: `Fft` requires `cfg.channels == 1` and
+/// `cfg.grid_width` ∈ `SUPPORTED_N` (= {64, 256}). Multi-channel
+/// (cfg.channels > 1) support is C-1-5 candidate. Mixed-radix grid
+/// sizes (32, 128, 512) are out of scope per the FFT primitive's
+/// pure-radix-4 constraint.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
+pub enum ConvolveMode {
+    /// Existing M2.3 direct convolution pass — exact CPU bit-equal
+    /// fallback, supports all channels and all grid sizes.
+    #[default]
+    Direct,
+    /// FFT-based convolution via `ConvolveFftPass` (kernel pre-FFT
+    /// + spectral multiply + per-kernel inverse FFT + layout
+    /// transpose). C=1 only, grid ∈ {64, 256} only.
+    Fft,
+}
 
 /// One full Flow-Lenia step on the GPU. Owns every buffer and bind
 /// group it needs for steady-state per-step recording.
@@ -57,6 +82,11 @@ pub struct GpuStepPipeline {
     gradient_pass: GradientPass,
     flow_pass: FlowPass,
     reintegrate_pass: ReintegratePass,
+
+    // M6.C-1-4-b: FFT-mode passes + kernel pre-FFT buffer. Both
+    // populated only when `convolve_mode == ConvolveMode::Fft`.
+    convolve_fft_pass: Option<ConvolveFftPass>,
+    kernel_fft: Option<KernelFftBuffers>,
 
     // Static buffers (re-used every step).
     kernel_buffers: GpuKernelBuffers,
@@ -88,6 +118,7 @@ pub struct GpuStepPipeline {
     width: u32,
     channels: u32,
     step_count: u64,
+    convolve_mode: ConvolveMode,
 }
 
 impl GpuStepPipeline {
@@ -97,6 +128,10 @@ impl GpuStepPipeline {
     /// `cfg` and `kernel_params` must agree on `num_kernels` and
     /// `channels` (asserted). `initial_a` must match `cfg`'s grid
     /// shape.
+    /// Backward-compatible constructor: defaults to
+    /// [`ConvolveMode::Direct`] so all existing callers
+    /// (`flow-lenia-app`, `flow-lenia-web`, M2.x / M4.x tests) keep
+    /// their pre-M6.C-1-4 behaviour byte-for-byte.
     #[must_use]
     pub fn new(
         ctx: &GpuContext,
@@ -104,6 +139,46 @@ impl GpuStepPipeline {
         kernel_params: &KernelParams,
         initial_a: &ActivationField,
     ) -> Self {
+        Self::new_with_mode(ctx, cfg, kernel_params, initial_a, ConvolveMode::Direct)
+    }
+
+    /// M6.C-1-4-b explicit-mode constructor. For `ConvolveMode::Fft`
+    /// the C=1 + grid ∈ {64, 256} restrictions apply (see
+    /// [`ConvolveMode`] rustdoc); violating them panics with a
+    /// pointer to the limitation. The bigger startup cost on this
+    /// path is the K-kernel forward 2D FFT precompute (M6.C-1-3),
+    /// done here so per-step `record_step_fft` issues no allocations
+    /// or readbacks of its own (modulo the per-call uniform / bind-
+    /// group allocations honestly framed in the helpers' rustdocs).
+    #[must_use]
+    pub fn new_with_mode(
+        ctx: &GpuContext,
+        cfg: &FlowLeniaConfig,
+        kernel_params: &KernelParams,
+        initial_a: &ActivationField,
+        convolve_mode: ConvolveMode,
+    ) -> Self {
+        if convolve_mode == ConvolveMode::Fft {
+            assert_eq!(
+                cfg.channels, 1,
+                "ConvolveMode::Fft requires cfg.channels == 1 in M6.C-1-4-b \
+                 (got {}); multi-channel + per-kernel source-channel routing \
+                 is C-1-5 candidate, see ConvolveFftPass module rustdoc.",
+                cfg.channels
+            );
+            assert!(
+                is_supported_n(cfg.grid_width),
+                "ConvolveMode::Fft requires cfg.grid_width ∈ {SUPPORTED_N:?} \
+                 (got {}); mixed-radix grid sizes (32, 128, 512) need a radix-2 \
+                 fall-out stage, out of scope per M6.C-1-2 scope-guardian.",
+                cfg.grid_width
+            );
+            assert_eq!(
+                cfg.grid_height, cfg.grid_width,
+                "ConvolveMode::Fft requires square grid (got {}×{})",
+                cfg.grid_height, cfg.grid_width
+            );
+        }
         let (h, w, c) = initial_a.dim();
         assert_eq!(
             (h, w, c),
@@ -247,12 +322,28 @@ impl GpuStepPipeline {
         );
         let gradient_u_bg = gradient_pass.make_bind_group_u(ctx, &u_buf, &grad_u_buf, &globals_buf);
 
+        // M6.C-1-4-b: build the FFT-mode passes + kernel pre-FFT
+        // buffer iff caller selected FFT mode. The assertions above
+        // already guaranteed the cfg shape is FFT-compatible.
+        let (convolve_fft_pass, kernel_fft) = match convolve_mode {
+            ConvolveMode::Direct => (None, None),
+            ConvolveMode::Fft => {
+                let n = cfg.grid_width;
+                let fft = ConvolveFftPass::new(ctx, n, kernel_buffers.count);
+                let kfft =
+                    precompute_kernel_ffts(ctx, kernel_params, n, &fft.fft2d, &fft.twiddles);
+                (Some(fft), Some(kfft))
+            }
+        };
+
         Self {
             convolve_pass,
             affinity_pass,
             gradient_pass,
             flow_pass,
             reintegrate_pass,
+            convolve_fft_pass,
+            kernel_fft,
             kernel_buffers,
             h_weights_buf,
             pre_g_buf,
@@ -273,6 +364,7 @@ impl GpuStepPipeline {
             width,
             channels,
             step_count: 0,
+            convolve_mode,
         }
     }
 
@@ -281,6 +373,15 @@ impl GpuStepPipeline {
     /// they submit the encoder for the next step to read the freshly
     /// written buffer.
     pub fn record_step(&self, encoder: &mut wgpu::CommandEncoder) {
+        assert_eq!(
+            self.convolve_mode,
+            ConvolveMode::Direct,
+            "record_step() supports Direct mode only. For Fft mode use \
+             step() (which routes to record_step_fft internally — the FFT \
+             path requires a &GpuContext for per-call uniform / bind-group \
+             allocations, honestly framed in ConvolveFftPass + scratch \
+             helper rustdocs)."
+        );
         let h = self.height;
         let w = self.width;
         let p = self.ping;
@@ -296,6 +397,51 @@ impl GpuStepPipeline {
         self.flow_pass.record(encoder, &self.flow_bgs[p], h, w);
         self.reintegrate_pass
             .record(encoder, &self.reintegrate_bgs[p], h, w);
+    }
+
+    /// M6.C-1-4-b FFT-mode per-step recording. Same downstream
+    /// passes as `record_step`, only the convolve sub-step differs:
+    /// FFT path = forward 2D + spectral multiply + per-kernel
+    /// inverse 2D + layout transpose, writing the same
+    /// `pre_g[y * W * K + x * K + ki]` layout the downstream
+    /// `affinity_growth` pass expects.
+    fn record_step_fft(&self, ctx: &GpuContext, encoder: &mut wgpu::CommandEncoder) {
+        let h = self.height;
+        let w = self.width;
+        let p = self.ping;
+        let fft = self.convolve_fft_pass.as_ref().expect(
+            "record_step_fft requires ConvolveMode::Fft; \
+             convolve_fft_pass populated in new_with_mode",
+        );
+        let kfft = self
+            .kernel_fft
+            .as_ref()
+            .expect("record_step_fft requires ConvolveMode::Fft; kernel_fft populated in new_with_mode");
+        // Convolve: FFT path. input_a is the current ping-pong
+        // buffer (channel 0 since C=1 enforced in new_with_mode).
+        fft.record(
+            ctx,
+            encoder,
+            &self.a_buffers[p],
+            &kfft.buffer,
+            &self.pre_g_buf,
+        );
+        // Downstream passes are identical to Direct mode.
+        self.affinity_pass
+            .record_constant(encoder, &self.affinity_bg, h, w);
+        self.gradient_pass
+            .record_u(encoder, &self.gradient_u_bg, h, w);
+        self.gradient_pass
+            .record_a_sum(encoder, &self.gradient_a_sum_bgs[p], h, w);
+        self.flow_pass.record(encoder, &self.flow_bgs[p], h, w);
+        self.reintegrate_pass
+            .record(encoder, &self.reintegrate_bgs[p], h, w);
+    }
+
+    /// Mode accessor.
+    #[must_use]
+    pub fn convolve_mode(&self) -> ConvolveMode {
+        self.convolve_mode
     }
 
     /// Flip the ping-pong index. Call this **after submitting** the
@@ -314,7 +460,10 @@ impl GpuStepPipeline {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("GpuStepPipeline step encoder"),
             });
-        self.record_step(&mut enc);
+        match self.convolve_mode {
+            ConvolveMode::Direct => self.record_step(&mut enc),
+            ConvolveMode::Fft => self.record_step_fft(ctx, &mut enc),
+        }
         ctx.queue.submit([enc.finish()]);
         self.swap_buffers();
     }
@@ -535,5 +684,129 @@ mod tests {
         let cfg = small_cfg(3, false, BorderMode::Wall);
         let (max_abs, max_rel) = compare_run(&cfg, 0x8_DD_8D, 5, 1e-3, 1e-4);
         eprintln!("[M2.8-wall]  5-step C=3 wall : max_abs={max_abs:.3e}  max_rel={max_rel:.3e}");
+    }
+
+    /// M6.C-1-4-b: Direct mode vs FFT mode in the full pipeline at
+    /// N=64 C=1 K=10 Torus. Both modes run from the same initial state
+    /// for a small number of steps; the per-cell activation difference
+    /// must stay within A.4.5-tiered g64 tolerance (rel < 5e-4),
+    /// matching the C-1-3 / C-1-4-a end-to-end FFT-vs-direct
+    /// convolution headroom propagated through the affinity / flow /
+    /// reintegrate stack.
+    ///
+    /// **C=1 + grid=64 only** per [`ConvolveMode::Fft`] limitation
+    /// (M6.C-1-4-b scope). M6.A `m1_regression_gpu` runs at C=3 and
+    /// is therefore NOT a host for this comparison; the FFT-mode
+    /// regression target is `tests/diagnose_divergence.rs` (the
+    /// existing C=1 testbed) plus this in-place sanity.
+    #[test]
+    fn gpu_pipeline_fft_mode_matches_direct_n64_c1_short() {
+        let (ctx, guard) = headless_ctx();
+        // Use the same kernel-radius / sigma defaults that drive
+        // diagnose_divergence so the FFT path stays in sync with
+        // the M6.A.4.5 C=1 measurement campaign's parameter space.
+        let cfg = FlowLeniaConfig {
+            grid_width: 64,
+            grid_height: 64,
+            channels: 1,
+            dt: 0.2,
+            sigma: 0.65,
+            n: 2.0,
+            beta_a: 2.0,
+            dd: 5,
+            num_kernels: 10,
+            paper_strict: false,
+            border: BorderMode::Torus,
+            mix_rule: MixRule::Stochastic,
+        };
+        let seed = 0x4F_FE_64_C1_u64;
+        let cpu_init = FlowLeniaSimulator::new(cfg, seed);
+        let initial_a = cpu_init.activation().clone();
+        let kernel_params = cpu_init.kernel_params().clone();
+
+        let mut direct =
+            GpuStepPipeline::new_with_mode(&ctx, &cfg, &kernel_params, &initial_a, ConvolveMode::Direct);
+        let mut fft =
+            GpuStepPipeline::new_with_mode(&ctx, &cfg, &kernel_params, &initial_a, ConvolveMode::Fft);
+
+        // Short horizon: the chaotic-amplification finding (M6.A.4.5)
+        // makes longer C=1 horizons noisy here too, so we keep the
+        // comparison at 5 steps (matches gpu_pipeline_wall_border_matches_cpu).
+        let n_steps: u32 = 5;
+        direct.run_steps(&ctx, n_steps);
+        fft.run_steps(&ctx, n_steps);
+
+        let direct_a = direct.readback_activation(&ctx);
+        let fft_a = fft.readback_activation(&ctx);
+
+        let (h, w, c) = direct_a.dim();
+        let mut max_abs = 0.0_f32;
+        let mut max_rel = 0.0_f32;
+        for ((y, x, ci), &d) in direct_a.indexed_iter() {
+            let f = fft_a[[y, x, ci]];
+            let abs_err = (d - f).abs();
+            let rel_err = abs_err / d.abs().max(1e-6);
+            max_abs = max_abs.max(abs_err);
+            max_rel = max_rel.max(rel_err);
+            assert!(
+                rel_err < 5e-4 || abs_err < 1e-5,
+                "({y}, {x}, c={ci}) after {n_steps} steps: direct={d} fft={f} \
+                 abs={abs_err:.3e} rel={rel_err:.3e}"
+            );
+        }
+        let _ = (h, w, c);
+        eprintln!(
+            "[M6.C-1-4-b] pipeline direct vs fft N=64 C=1 K=10 Torus {n_steps}-step : \
+             max_abs={max_abs:.3e}  max_rel={max_rel:.3e}"
+        );
+
+        if let Some(g) = &guard {
+            g.assert_no_errors();
+        }
+    }
+
+    /// M6.C-1-4-b: ConvolveMode::Fft must reject `cfg.channels > 1`
+    /// at construction (deferred to C-1-5+ candidate).
+    /// **grid=64** so the supported-grid assert cannot fire first
+    /// (Round 1 review S-3: orthogonal test, isolates the channel
+    /// guard specifically).
+    #[test]
+    #[should_panic(expected = "ConvolveMode::Fft requires cfg.channels == 1")]
+    fn gpu_pipeline_fft_mode_rejects_multi_channel() {
+        let (ctx, _guard) = headless_ctx();
+        let mut cfg = small_cfg(3, false, BorderMode::Torus);
+        cfg.grid_width = 64;
+        cfg.grid_height = 64;
+        let kernel_params = FlowLeniaSimulator::new(cfg, 0).kernel_params().clone();
+        let initial_a = FlowLeniaSimulator::new(cfg, 0).activation().clone();
+        let _ = GpuStepPipeline::new_with_mode(
+            &ctx,
+            &cfg,
+            &kernel_params,
+            &initial_a,
+            ConvolveMode::Fft,
+        );
+    }
+
+    /// M6.C-1-4-b: ConvolveMode::Fft must reject unsupported grid
+    /// sizes (only {64, 256} pass; 32 / 128 / 512 are mixed-radix,
+    /// deferred to C-1-5+).
+    #[test]
+    #[should_panic(expected = "ConvolveMode::Fft requires cfg.grid_width")]
+    fn gpu_pipeline_fft_mode_rejects_unsupported_grid() {
+        let (ctx, _guard) = headless_ctx();
+        // Build a C=1 cfg with grid=32 (rejected by SUPPORTED_N=[64, 256]).
+        let mut cfg = small_cfg(1, false, BorderMode::Torus);
+        cfg.grid_width = 32;
+        cfg.grid_height = 32;
+        let kernel_params = FlowLeniaSimulator::new(cfg, 0).kernel_params().clone();
+        let initial_a = FlowLeniaSimulator::new(cfg, 0).activation().clone();
+        let _ = GpuStepPipeline::new_with_mode(
+            &ctx,
+            &cfg,
+            &kernel_params,
+            &initial_a,
+            ConvolveMode::Fft,
+        );
     }
 }
