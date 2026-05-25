@@ -356,6 +356,116 @@ impl Fft2dPass {
         }
     }
 
+    /// M6.C-1-4 caller-supplied-scratch hot-path 2D forward FFT.
+    /// Same algorithm as [`forward_2d`] but the caller owns the input,
+    /// output, and one complex-sized scratch buffer. The large
+    /// `n²`-complex data buffers do not reallocate per call; appends
+    /// 2 dispatches to the supplied encoder and does not submit or
+    /// poll. Designed for `ConvolveFftPass` per-step orchestration
+    /// where the same data scratch buffers persist across thousands
+    /// of frames.
+    ///
+    /// **Honest framing** (Round 2 review NC1): per-call this helper
+    /// still creates two `FftParams` uniform buffers (one each for
+    /// the H and V axes) and two bind groups, because `upload_params`
+    /// and `make_bind_group` are called inside. Hoisting these is
+    /// straightforward (the buffer identities are caller-fixed) but
+    /// is deferred to C-1-4-b / C-1-5 perf phase together with the
+    /// matching hoist on the `ConvolveFftPass` side. Callers
+    /// integrating this into a tight per-frame loop should expect
+    /// ~4 small wgpu object creations per call until that lands.
+    ///
+    /// Buffer contract:
+    /// - `input_complex`: bound as `array<f32>`. The H-axis shader
+    ///   addresses only the first `n²` f32 slots
+    ///   (`input[row * n + col]`) on the forward path, so a
+    ///   real-valued input may be a tightly-packed `4n²`-byte buffer;
+    ///   a complex-sized `8n²`-byte buffer also works (the second
+    ///   half is simply not read on the forward path). (Round 2
+    ///   review NC2 rewrite — the previous "upper half" wording was
+    ///   left over from an in-place-FFT draft.)
+    /// - `scratch_complex`: `n²` complex (`8n²` bytes), scratch
+    ///   between H and V.
+    /// - `output_complex`: `n²` complex (`8n²` bytes), receives the
+    ///   2D spectrum.
+    pub fn forward_2d_with_scratch(
+        &self,
+        ctx: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+        twiddles: &wgpu::Buffer,
+        input_complex: &wgpu::Buffer,
+        scratch_complex: &wgpu::Buffer,
+        output_complex: &wgpu::Buffer,
+    ) {
+        let n = self.n;
+        let params_h = self
+            .h
+            .upload_params(ctx, FftParams::new(n, n, FftDirection::Forward));
+        let params_v = self
+            .v
+            .upload_params(ctx, FftParams::new(n, n, FftDirection::Forward));
+        let bg_h = self.h.make_bind_group(
+            ctx,
+            input_complex,
+            twiddles,
+            scratch_complex,
+            &params_h,
+        );
+        let bg_v = self.v.make_bind_group(
+            ctx,
+            scratch_complex,
+            twiddles,
+            output_complex,
+            &params_v,
+        );
+        self.h.record(encoder, &bg_h, n);
+        self.v.record(encoder, &bg_v, n);
+    }
+
+    /// M6.C-1-4 caller-supplied-scratch 2D inverse FFT. Mirror of
+    /// [`forward_2d_with_scratch`] but with `direction = Inverse` and
+    /// V-then-H ordering (matching the round-trip layout used by
+    /// `ConvolveFftPass`).
+    ///
+    /// Same per-call allocation caveat as the forward helper (Round 2
+    /// review NC1): two `FftParams` uniform buffers + two bind groups
+    /// are created per call; hoist deferred to C-1-4-b / C-1-5.
+    /// `input_complex` is always treated as complex `vec2<f32>` on the
+    /// inverse path (no real-input branch).
+    pub fn inverse_2d_with_scratch(
+        &self,
+        ctx: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+        twiddles: &wgpu::Buffer,
+        input_complex: &wgpu::Buffer,
+        scratch_complex: &wgpu::Buffer,
+        output_complex: &wgpu::Buffer,
+    ) {
+        let n = self.n;
+        let params_v = self
+            .v
+            .upload_params(ctx, FftParams::new(n, n, FftDirection::Inverse));
+        let params_h = self
+            .h
+            .upload_params(ctx, FftParams::new(n, n, FftDirection::Inverse));
+        let bg_v = self.v.make_bind_group(
+            ctx,
+            input_complex,
+            twiddles,
+            scratch_complex,
+            &params_v,
+        );
+        let bg_h = self.h.make_bind_group(
+            ctx,
+            scratch_complex,
+            twiddles,
+            output_complex,
+            &params_h,
+        );
+        self.v.record(encoder, &bg_v, n);
+        self.h.record(encoder, &bg_h, n);
+    }
+
     /// M6.C-1-3 standalone 2D forward FFT helper. Runs the two-axis
     /// dispatch on a real `n × n` input and returns the complex
     /// `n × n` spectrum as `Vec<[f32; 2]>` (.0 = real, .1 = imag).
