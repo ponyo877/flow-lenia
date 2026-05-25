@@ -9,6 +9,7 @@
 
 pub mod affinity_growth;
 pub mod convolve;
+pub mod fft;
 pub mod flow;
 pub mod gradient;
 pub mod reintegrate;
@@ -19,6 +20,7 @@ pub use affinity_growth::{
     MAX_KERNELS,
 };
 pub use convolve::ConvolvePass;
+pub use fft::{precompute_twiddles_1d, FftParams, FftPass, FFT_N};
 pub use flow::FlowPass;
 pub use gradient::GradientPass;
 pub use reintegrate::ReintegratePass;

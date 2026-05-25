@@ -29,3 +29,8 @@ image = { version = "0.24", default-features = false, features = ["png"] }
 # current / peak heap usage. dev-only so production binaries
 # (`flow-lenia-app`, `flow-lenia-web`) keep the system allocator.
 peak_alloc = "0.3"
+# M6.C-1-1 FFT primitive — CPU reference for forward-FFT bit-equal
+# comparison tests. dev-only; the GPU implementation is hand-written
+# WGSL in `src/shaders/fft_1d_radix4.wgsl`. `num-complex` is rustfft's
+# input/output type and is pulled in transitively as a dev-dep only.
+rustfft = "6"
