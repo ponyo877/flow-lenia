@@ -1,10 +1,77 @@
-# Flow-Lenia WebGPU Visualizer — 設計書 (Rev. 4.6)
+# Flow-Lenia WebGPU Visualizer — 設計書 (Rev. 4.7)
 
 本書は Rust + WebAssembly + WebGPU で **Flow-Lenia (Plantec et al., 2025, Artificial Life journal, arXiv:2506.08569v1)** を厳密に再現し、ブラウザ上でリアルタイム可視化する実装の設計書である。
 
 **実装の正典**は `papers/2506.08569v1.pdf` (2025年版) であり、Equation 番号は同論文を指す。副参照として `papers/2212.07906v2.pdf` (2023年版)、Moroz, 2020 "Reintegration tracking"、**公式 JAX 実装** `references/FlowLenia-jax/` (commit `dce428c`, 2024-02-08) を用いる。JAX 実装の精読結果は `references/JAX_NOTES.md` を参照。
 
 ## Rev. 履歴
+
+### Rev.4.7 (2026-05、M6.C-1 WGSL FFT 実装完了)
+
+- **M6.C-1 (WGSL FFT 実装) 全体完了**。M6.C-1-1 から M6.C-1-6 まで 9
+  commits (内部分割 6 sub-step、C-1-4/C-1-5/C-1-6 はそれぞれ -a/-b に
+  分割)。SHA 一覧と各 sub-step 内容は BENCH.md §14 sub-step inventory
+  参照。
+- **主要成果**:
+  - **FFT 化 end-to-end speedup** (paired-run N=3 median quiesced、N=64):
+    - C=1: direct 13.31 ms (75.1 sps) → fft 1.62 ms (616.4 sps)、ratio **8.206×**
+    - C=3: direct 16.33 ms (61.2 sps) → fft 1.89 ms (529.9 sps)、ratio **8.655×**
+    - C-1-4-b 早期撤退ゲート (≥ 2.0×) 両 channel count PASS、自走 commit
+  - **Cooley-Tukey radix-4 algorithm** 採用 (M6.B 文献調査 §2.5 fgiesen
+    推奨)。Stockham + ping-pong は L1 圧迫で却下。動的 N ∈ {64, 256}
+    は WGSL pipeline-override constant で実現
+  - **Method B inverse** (`IDFT(y) = (1/N) conj(DFT(conj(y)))`): conjugate-
+    twiddle 単独は radix-4 butterfly の `complex_mul_i` (= `i*(q1-q3)`)
+    も符号反転必要で fail (C-1-2 で N=4 手計算で発覚)、Method B で fix
+  - **kernel pre-FFT** (起動時 1 回、K × N×N complex を 1 storage buffer
+    に concat、5.24 MB at N=256/K=10)
+  - **ConvolveFftPass** (kernel routing で multi-channel + per-kernel
+    source_channel 対応): direct ConvolvePass の `meta_arr[ki].source_channel`
+    semantics を WGSL `kernel_routing` storage buffer + indirect read で
+    実現、single SM dispatch 維持
+  - **ConvolveMode::Auto fallback**: grid 64/256 で fft、grid 32/128/512
+    は direct fallback (mixed-radix 未対応、scope-guardian C-1-2 で defer)
+- **物理的観察**:
+  - **C=3 で end-to-end 8.7× speedup** (当初 BENCH §13 predict 3-4× を 2×
+    超過): direct path は per-kernel × per-channel inner loop で C scaling
+    重い、FFT path は K kernels 共有 + per-channel forward 1/channel で
+    C scaling 軽い
+  - **long-horizon stability** (bench_long_horizon_fft):
+    - horizon 10 で既に A.4.5 tolerance violation 開始 (C=1 random max_rel
+      8.30e-4 vs tolerance 5e-4)
+    - horizon 50-100 で chaotic saturation (max_rel ≥ O(1))、direct と FFT
+      は same Lyapunov attractor 上の different trajectories
+    - per-step amplification factor 1.11-1.24× (geom over 10→100、
+      saturation 込みなので representative ではない)
+  - **identical-kernels controlled experiment**: kernel parameter scaling
+    は寄与あるが dominant ではない、FFT inject が主因
+  - **Layer 4 (snapshot regression) は短期 horizon (≤ 5-10 step) でのみ
+    meaningful**、長期 horizon は Lenia chaos の性質上 physically impossible
+- **方法論的成果** (M6.C-2 以降で再利用):
+  - **early-exit gate**: bench_fft_vs_direct paired-run で ratio < 2× なら
+    Phase 3 改訂条件 2 で Ponyo877 さん戦略相談、≥ 2× で自走 commit
+    (C-1-4-b で確立、C-1-5-b で C=3 拡張)
+  - **scope-guardian re-consultation pattern**: Option β3 (元 approve) →
+    Option β2 (本実装で feature regression 発覚 → 再 approve) の自走判断
+    (Rule 3 trigger なし) を C-1-5-b で確立、subagent 介在で戦略 escalation
+    回避
+  - **honest framing**: ratio claims に "当初予想超過は C scaling 効果で
+    legitimate" 等 commit body で reasoning 提示、CLAUDE.md 原則 4 遵守
+- **§8 M6 セクション**: M6.A = ✅、M6.B = ✅、M6.C-1 = ✅、M6.C-2 (kernel
+  fusion + subgroup ops) 次着手、M6.C-3 (mixed-precision) は Stage 1 で
+  採用判断、M6.C-4 (4 creature 実装) は M6.C-2 後
+- **Stage 1 中間評価入力**: BENCH §14 で raw measurement + Amdahl
+  extrapolation の framing。**戦略判断 (撤退 / 継続 / 縮小 / 目標再評価)
+  は Ponyo877 さん責任**、本 Rev 4.7 は input 提供
+- **M6.C-2 以降へ引き継ぐ未解決事項**:
+  - bench_fft_breakdown (per-pass timing for fft mode) は C-1-6-β scope
+    creep 回避で defer、C-2 perf phase で実施
+  - perf_regression baseline update も C-1-6-β code-only commit に絞り、
+    BENCH §1 数値の手動 update は C-2 全 grid benchmark 後に纏める
+  - N=256 long-horizon 実測は cold-boot quiesced session 必要、Stage 1
+    後の C-2 perf phase で実施 (本 Rev 4.7 は Amdahl extrapolation のみ)
+  - kernel routing UI invalidate (param-painting M5 candidate) は M6.C-4 /
+    M5 で対応 (`update_globals` rustdoc TODO 既記載)
 
 ### Rev.4.6 (2026-05、M6.A 検証基盤完了)
 

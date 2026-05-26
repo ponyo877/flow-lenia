@@ -934,10 +934,127 @@ canonical text; this list is the index.
   validation under chaos (the field comparison is meaningless past
   the Lyapunov saturation timescale).
 
+## Section 14 — M6.C-1 retro + Stage 1 中間評価入力 (Phase 3 改訂条件 1)
+
+M6.C-1 (WGSL FFT 実装) 全体完了の retrospective。**Ponyo877 さん
+Stage 1 中間評価判断のための input section** — 戦略判断 (撤退 / 継続 /
+縮小 / 目標再評価) は Ponyo877 さん責任、本 section は Claude Code
+からの measured data + assumptions の honest summary に留める。
+
+### Sub-step inventory (commit SHA)
+
+| sub-step | commit | 内容 |
+|---|---|---|
+| C-1-1 | `cf61b92` | 1D Cooley-Tukey radix-4 FFT primitive (N=256 固定) |
+| C-1-2 | `8363a5f` | 2D RFFT separable + 動的 N {64, 256} + GPU 完結 inverse |
+| C-1-3 | `24cec08` | kernel pre-FFT 永続化 + spectral multiply pass |
+| C-1-4-a | `6f27df1` | ConvolveFftPass primitive (C=1 only) + scratch helpers |
+| C-1-4-b | `91a59f7` | GpuStepPipeline ConvolveMode 統合 + 早期撤退ゲート PASS (8.697×) |
+| C-1-5-a | `3da2359` | ConvolveFftPass multi-channel (C ≥ 1) + per-kernel routing |
+| C-1-5-b | `cf61645` | ConvolveMode::Auto default + bench C=1/C=3 (8.2× / 8.7×) |
+| C-1-6-α | `05b94ea` | bench_long_horizon_fft binary (horizon 10/50/100 sweep) |
+| C-1-6-β | *this commit* | BENCH retro + DESIGN Rev.4.7 + Stage 1 input |
+
+### 主要観察
+
+1. **FFT 化 end-to-end speedup**: bench_fft_vs_direct paired-run N=3 median,
+   N=64 K=10 Torus, quiesced state:
+   - **C=1**: direct 13.31 ms/step (75.1 sps) → fft 1.62 ms/step (616.4 sps)、
+     **ratio 8.206×**
+   - **C=3**: direct 16.33 ms/step (61.2 sps) → fft 1.89 ms/step (529.9 sps)、
+     **ratio 8.655×**
+   - 当初 BENCH §13 line 924 predict "3-4×" を **2× 超過**、特に C=3 で
+     direct の per-kernel × per-channel inner loop が FFT path の K kernels
+     共有 + per-channel forward 1 回 / channel より C scaling 大幅悪い
+   - **N=256 extrapolation**: per-pass breakdown 未測定 (C-1-6-β scope
+     creep に該当、C-2 perf phase に defer)。BENCH §1 の N=256/C=3 direct
+     230.14 ms/step (4.3 sps) に対し FFT で同 8.7× ratio を仮定すると
+     ~26.5 ms/step ≈ 38 sps、ただし: (a) per-channel forward の C scaling
+     は dispatch overhead でなく FFT compute cost (O(N² log N))、N が
+     増えると total FFT cost に占める share 大 → ratio が下がる方向、(b)
+     dispatch overhead は per-pass overhead で N と無関係 → small N で
+     ratio 大、大 N で convolve compute が dominant で ratio 小、合 (a)+(b)
+     で N=256 の actual ratio は **3-5×** が現実圏内 (M6.B literature
+     survey §7.1 C-1 predict 3-4× と整合)
+
+2. **long-horizon stability** (bench_long_horizon_fft、N=64 K=10 Torus
+   single-trial diagnostic):
+   - horizon **10 step で既に tolerance violation 開始**: C=1 random max_rel
+     8.30e-4 vs A.4.5 tiered g64 = 5e-4 → **1.66× 超過**
+   - horizon 50-100 で **chaotic saturation**: max_rel ≥ O(1)、direct と
+     FFT は same Lyapunov attractor 上の different trajectories
+   - per-step amplification factor (geom over horizon 10→100): 1.11-1.24×
+     (random vs identical kernels で 約 1.1× 差、saturation 込み geom mean
+     は representative value ではない)
+   - **identical-kernels controlled experiment** (C-1-4-b S-2 deferred 解析):
+     kernel parameter scaling は **寄与あるが dominant ではない**、FFT inject
+     が主因 (random vs identical の max_rel は order 同等、saturation pattern
+     同等)
+
+3. **Layer 4 (snapshot regression) の意義 redefinition**:
+   - Layer 4 snapshot は短期 horizon (≤ 5-10 step) でのみ meaningful、長期
+     horizon は Lenia chaos の性質上 physically impossible
+   - 本 sub-step では Direct path baseline を維持 (M6.A.5 で生成)、FFT path
+     baseline は Stage 1 中間評価で Ponyo877 さん判断後 (採用 確定後) 再生成
+
+4. **multi-channel + per-kernel source_channel routing** (C-1-5-a):
+   - 案 a (WGSL indirect routing) 採用、case b (per-channel SM batch K×C
+     dispatch) は overhead 増で却下
+   - C=3 5-step direct vs fft max_rel 2.094e-4 (tolerance 5e-4 で 2.4×
+     headroom、C=1 の 1.675e-4 より 25% 大、multi-channel coupling 影響)
+   - per-channel forward × C 回 + copy_buffer_to_buffer × 2C の overhead
+     はあるが、C=3 で end-to-end 8.7× speedup を達成
+
+5. **Auto fallback (C-1-5-b)**:
+   - grid 32/128/512 mixed-radix は FFT primitive 未対応、direct fallback
+     で feature regression 回避
+   - mixed-radix 対応は M6.C-1 後半 or M5 で判定 (今は scope out)
+   - 既存 UI / test sweep を破壊せず、grid 64/256 で FFT 化を享受
+
+### Stage 1 中間評価への input (Ponyo877 さん判断材料)
+
+CLAUDE.md 撤退ライン "256×256×3×4creature で 30 FPS なら M5 へ"
+= 33 ms/step。
+
+**直接測定** (single-trial diagnostic、CLAUDE.md §測定プロトコル準拠の
+paired-run + N=3 median は bench_fft_vs_direct のみ):
+- N=64 / C=1 / K=10 / fft: 1.62 ms/step (616 sps)、目標 60 FPS 余裕度 10×
+- N=64 / C=3 / K=10 / fft: 1.89 ms/step (530 sps)、目標 60 FPS 余裕度 8.8×
+- N=64 / C=3 / direct: 16.33 ms/step (61 sps)、目標 60 FPS 余裕度 1.0×
+
+**Amdahl extrapolation** (理論、未測定):
+- N=256 / C=3 / direct (BENCH §1 line 35): 230.14 ms/step (4.3 sps)、目標
+  60 FPS 余裕度 0.07× → unacceptable for production
+- N=256 / C=3 / fft: **3-5× speedup 推定** = 46-77 ms/step (13-22 sps)、
+  60 FPS 未達、撤退ライン 30 FPS (33 ms/step) も marginal
+- M6.C-2 (kernel fusion + subgroup) で **追加 1.5-2× 期待** (M6.B literature
+  survey §7.1)、N=256 で 23-50 ms/step (20-43 sps) → 撤退ライン clearに上
+
+**4 creature 影響**:
+- Plantec 2025 paper の multi-creature 表現方式 (additive channel か独立
+  グリッド か) は M6.B survey §9.1 で **未確認** (本文 PDF 未読)
+- 1 グリッド additive channel なら C=12 (3 ch × 4 creature) 相当 = per-channel
+  forward FFT 12 回、per-step time ~ C scaling の 12/3 = 4× で 92-200 ms/step
+  → 撤退ライン未達 (Stage 1 撤退 判断材料)
+- 独立グリッド × 4 なら GPU pipeline 4 並列 = throughput 1/4 = 92-200 ms/step
+  同じ
+- M6.C-4 (4 creature 実装 + Stage 2 動作確認) で実測必須
+
+**まとめ** (Claude Code 判断ではなく measured data の framing):
+- N=64 / C=3 で FFT 化により 8.7× speedup 達成、60 FPS 目標 余裕度 8.8×
+- N=256 / C=3 / 4 creature の Stage 1 ターゲットは extrapolation でも未達、
+  C-2 fusion + C-4 4-creature 実測で正式判断
+- Long-horizon (horizon ≥ 10) で direct と FFT は chaotic separation、
+  これは Lenia の inherent dynamics、FFT path 固有の bug ではない
+- Stage 1 判断 (撤退 / 継続 / 縮小 / 目標再評価) は Ponyo877 さん責任、
+  C-1-6 commit + push 後 Phase 3 改訂条件 1 で Claude Web 送信
+
 ## Re-running
 
 ```sh
 cargo run --release --bin bench_step
+cargo run --release --bin bench_fft_vs_direct
+cargo run --release --bin bench_long_horizon_fft
 ```
 
 Output goes to stderr in markdown-ready table format; redirect or
