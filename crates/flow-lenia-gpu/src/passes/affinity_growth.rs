@@ -689,4 +689,159 @@ mod tests {
             g.assert_no_errors();
         }
     }
+
+    /// M6.C-2-4-b: bridge test verifying that the new
+    /// `parameter_map::build_for_patches` + `parameter_map::upload`
+    /// pair (C-2-4-a) produces a buffer that the existing M2.4
+    /// `affinity_growth_localized` Eq. 7 pipeline accepts and that
+    /// the numerical result matches the CPU reference for a 4-creature
+    /// patch layout (Plantec 2025 §4.3.2 layout, specialised to 4
+    /// creatures per Ponyo877-san strategic decision 2026-05-27).
+    ///
+    /// This is a **wiring test** — the localised pipeline itself is
+    /// unchanged; what's new is that the per-cell `P_i(x)` is
+    /// constructed via `CreaturePatch` patches rather than an
+    /// `ndarray::Array3<f32>`. Production code switch (AffinityMode
+    /// = Localized in `GpuStepPipeline.simulate()`) lands in C-2-4-d.
+    #[test]
+    fn affinity_growth_localized_with_parameter_map_four_creatures_matches_cpu() {
+        use crate::passes::parameter_map;
+        let (ctx, guard) = headless_ctx();
+        let conv_pass = ConvolvePass::new(&ctx);
+        let ag_pass = AffinityGrowthPass::new(&ctx);
+        let mut rng = ChaCha8Rng::seed_from_u64(0xC2_4B_4C);
+
+        let (h, w, c, num_kernels) = (32_usize, 32_usize, 3_usize, 8_u32);
+        let activation = make_random_activation(&mut rng, h, w, c);
+        let params = KernelParams::sample_random(
+            &mut rng,
+            SamplingSettings {
+                num_kernels,
+                num_channels: c as u32,
+            },
+        );
+
+        // 4 creature patches at the corners (8×8 each on a 32×32 grid).
+        // Each creature's P vector is distinct; outside any patch the
+        // default P is zero so the surrounding background contributes
+        // nothing to U_j(x) — letting us spot mistakes in patch
+        // placement immediately.
+        let n_u32 = h as u32;
+        let k_usize = num_kernels as usize;
+        let default_p = vec![0.0_f32; k_usize];
+        let creature_p: Vec<Vec<f32>> = (0..4u32)
+            .map(|c_idx| {
+                (0..num_kernels)
+                    .map(|ki| (c_idx as f32 + 1.0) * (ki as f32 + 1.0) * 0.02)
+                    .collect()
+            })
+            .collect();
+        let patches: Vec<parameter_map::CreaturePatch> = (0..4u32)
+            .map(|c_idx| {
+                let (y0, x0) = match c_idx {
+                    0 => (4, 4),
+                    1 => (4, 20),
+                    2 => (20, 4),
+                    3 => (20, 20),
+                    _ => unreachable!(),
+                };
+                parameter_map::CreaturePatch {
+                    bbox: (y0, x0, y0 + 8, x0 + 8),
+                    p_vector: creature_p[c_idx as usize].clone(),
+                }
+            })
+            .collect();
+
+        // CPU side: project the same patches into ndarray::Array3
+        // so we can call the existing `affinity_with_localized_weights`
+        // reference. This is the cell-major (H, W, K) layout — same
+        // as `parameter_map::build_for_patches` row-major output.
+        let mut p_array = ndarray::Array3::<f32>::zeros((h, w, k_usize));
+        for patch in &patches {
+            let (y0, x0, y1, x1) = patch.bbox;
+            for y in (y0 as usize)..(y1 as usize) {
+                for x in (x0 as usize)..(x1 as usize) {
+                    for ki in 0..k_usize {
+                        p_array[[y, x, ki]] = patch.p_vector[ki];
+                    }
+                }
+            }
+        }
+
+        // GPU side via the new parameter_map module (C-2-4-a output).
+        let p_flat = parameter_map::build_for_patches(n_u32, num_kernels, &default_p, &patches);
+        assert_eq!(p_flat.len(), h * w * k_usize);
+
+        let a_buf = upload_activation(&ctx, &activation);
+        let kernels = upload_kernels(&ctx, &params);
+        let pre_g_buf =
+            ConvolvePass::allocate_pre_g(&ctx, h as u32, w as u32, kernels.count);
+        let u_out_buf =
+            AffinityGrowthPass::allocate_u_out(&ctx, h as u32, w as u32, c as u32);
+        let globals = GpuGlobals::new(
+            h as u32,
+            w as u32,
+            c as u32,
+            kernels.count,
+            kernels.max_side,
+            BorderMode::Torus,
+        );
+        let conv_globals_buf = ConvolvePass::upload_globals(&ctx, &globals);
+        let ag_globals_buf = AffinityGrowthPass::upload_globals(&ctx, &globals);
+        let p_buf = parameter_map::upload(&ctx, &p_flat);
+
+        let conv_bg = conv_pass.make_bind_group(
+            &ctx,
+            &a_buf,
+            &kernels,
+            &pre_g_buf,
+            &conv_globals_buf,
+        );
+        let ag_bg = ag_pass.make_bind_group(
+            &ctx,
+            &pre_g_buf,
+            &kernels,
+            &p_buf,
+            &u_out_buf,
+            &ag_globals_buf,
+        );
+
+        let mut enc = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("C-2-4-b parameter_map → affinity_localized bridge test"),
+            });
+        conv_pass.record(&mut enc, &conv_bg, h as u32, w as u32);
+        ag_pass.record_localized(&mut enc, &ag_bg, h as u32, w as u32);
+        ctx.queue.submit([enc.finish()]);
+        ctx.device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .unwrap();
+
+        let gpu_flat = readback_buffer::<f32>(&ctx, &u_out_buf, h * w * c);
+        let (cpu_kernels, cpu_meta) = precompute_cpu_kernels(&params);
+        let cpu_u = affinity_with_localized_weights(
+            &activation,
+            &cpu_kernels,
+            &cpu_meta,
+            &p_array,
+            BorderMode::Torus,
+        );
+
+        // Eq. 7 tolerance: 1e-4 relative OR 1e-5 absolute (matches
+        // `affinity_growth_localized_matches_cpu` baseline since this
+        // test exercises the same WGSL pipeline).
+        let (max_abs, max_rel) = compare_to_cpu(&gpu_flat, &cpu_u, 1e-4, 1e-5);
+        eprintln!(
+            "[C-2-4-b] 32×32 torus C=3 K=8 4-creature : max_abs={max_abs:.3e}  \
+             max_rel={max_rel:.3e}"
+        );
+
+        if let Some(g) = &guard {
+            g.assert_no_errors();
+        }
+    }
 }
