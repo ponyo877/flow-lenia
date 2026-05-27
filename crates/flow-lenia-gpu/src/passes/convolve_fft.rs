@@ -76,12 +76,153 @@
 //! must include this overhead in the early-exit gate ratio (do
 //! not mistake it for FFT compute cost).
 
-use crate::passes::fft::{precompute_twiddles_1d, Fft2dPass};
+use crate::passes::fft::{precompute_twiddles_1d, Fft2dPass, FftAxis, FftDirection, FftParams};
 use crate::passes::spectral_multiply::{SpectralMultiplyParams, SpectralMultiplyPass};
 use crate::GpuContext;
 use bytemuck::{Pod, Zeroable};
 use flow_lenia_core::params::KernelParams;
 use wgpu::util::DeviceExt;
+
+/// M6.C-2-1-a fused H-axis inverse + transpose-to-pre_g.
+/// Mirror of WGSL `struct InvPreGParams`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct InvPreGParams {
+    pub n: u32,
+    pub num_rows: u32,
+    pub ki: u32,
+    pub k_total: u32,
+}
+
+impl InvPreGParams {
+    #[must_use]
+    pub fn new(n: u32, num_rows: u32, ki: u32, k_total: u32) -> Self {
+        Self {
+            n,
+            num_rows,
+            ki,
+            k_total,
+        }
+    }
+}
+
+/// Compiled H-axis inverse + transpose pass (C-2-1-a kernel fusion
+/// case c). Takes the V-axis inverse output (complex N×N for kernel
+/// ki) and writes the real-valued cell-major `pre_g[y * W * K + x * K + ki]`
+/// slot for ki in a single dispatch — no separate transpose dispatch.
+pub struct FftInvToPreGPass {
+    pub n: u32,
+    pub pipeline: wgpu::ComputePipeline,
+    pub bind_group_layout: wgpu::BindGroupLayout,
+}
+
+impl FftInvToPreGPass {
+    #[must_use]
+    pub fn new(ctx: &GpuContext, n: u32) -> Self {
+        const SOURCE: &str = include_str!("../shaders/fft_1d_radix4_inv_to_pre_g.wgsl");
+        let shader = ctx
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("fft_1d_radix4_inv_to_pre_g.wgsl"),
+                source: wgpu::ShaderSource::Wgsl(SOURCE.into()),
+            });
+        let bind_group_layout =
+            ctx.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("fft_inv_to_pre_g bind group layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+        let pipeline_layout = ctx.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("fft_inv_to_pre_g pipeline layout"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
+        let constants: [(&str, f64); 1] = [("WORKGROUP_X", f64::from(n))];
+        let pipeline = ctx
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(&format!("fft_inv_to_pre_g pipeline (N={n})")),
+                layout: Some(&pipeline_layout),
+                module: &shader,
+                entry_point: Some("fft_1d_radix4_inv_to_pre_g"),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &constants,
+                    zero_initialize_workgroup_memory: false,
+                },
+                cache: None,
+            });
+        Self {
+            n,
+            pipeline,
+            bind_group_layout,
+        }
+    }
+
+    pub fn record(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        bind_group: &wgpu::BindGroup,
+        num_rows: u32,
+    ) {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("fft_inv_to_pre_g pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, bind_group, &[]);
+        pass.dispatch_workgroups(num_rows, 1, 1);
+    }
+
+    #[must_use]
+    pub fn upload_params(ctx: &GpuContext, params: InvPreGParams) -> wgpu::Buffer {
+        ctx.device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("fft_inv_to_pre_g params uniform"),
+                contents: bytemuck::bytes_of(&params),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            })
+    }
+}
 
 /// Mirror of WGSL `struct PreGParams`. 16-byte aligned for uniform.
 #[repr(C)]
@@ -204,6 +345,14 @@ pub struct ConvolveFftPass {
     pub c: u32,
     pub fft2d: Fft2dPass,
     pub sm_pass: SpectralMultiplyPass,
+    /// M6.C-2-1-a: fused H-axis inverse + transpose-to-pre_g pass
+    /// (replaces the previous V-axis inverse + H-axis inverse +
+    /// FftToPreGPass chain's tail dispatch).
+    pub inv_to_pre_g_pass: FftInvToPreGPass,
+    /// **Deprecated as of C-2-1-a** but kept for callers that still
+    /// expect the old `k_complex_out`-based layout path. C-2-1-b or
+    /// later commit will delete this once we confirm no external
+    /// consumers exist.
     pub layout_pass: FftToPreGPass,
     pub twiddles: wgpu::Buffer,
     /// `n²` complex scratch — H/V FFT intermediate (shared across
@@ -272,6 +421,8 @@ impl ConvolveFftPass {
         let c = channels;
         let fft2d = Fft2dPass::new(ctx, n);
         let sm_pass = SpectralMultiplyPass::new(ctx);
+        let inv_to_pre_g_pass = FftInvToPreGPass::new(ctx, n);
+        // layout_pass retained for backward-compat (deprecated by C-2-1-a).
         let layout_pass = FftToPreGPass::new(ctx);
         let twiddles = precompute_twiddles_1d(ctx, n);
 
@@ -347,6 +498,7 @@ impl ConvolveFftPass {
             c,
             fft2d,
             sm_pass,
+            inv_to_pre_g_pass,
             layout_pass,
             twiddles,
             scratch_complex,
@@ -474,7 +626,31 @@ impl ConvolveFftPass {
         // or move the offset handling into the caller. Deferred to
         // C-1-5 perf phase; the K extra copies are encoder-internal
         // and cheap relative to the K inverse-FFT dispatches.
+        // M6.C-2-1-a kernel fusion case c:
+        //
+        //   per kernel ki:
+        //     a) copy k_spectra[ki slice] → inv_in
+        //     b) V-axis inverse: inv_in → scratch_complex (Method B,
+        //        no normalize yet — that lands at the H-axis store)
+        //     c) Fused H-axis inverse + transpose to cell-major pre_g:
+        //        scratch_complex → pre_g_out[ki slot, real, 1/N normalised]
+        //
+        // Saved at K=10: 11 dispatches (10 × per-kernel
+        // copy_buffer_to_buffer to k_complex_out + 1 final
+        // FftToPreGPass), see fft_1d_radix4_inv_to_pre_g.wgsl header
+        // for the dispatch-count math.
+        //
+        // Note: the V-axis inverse still uses the standard
+        // `inverse_2d_with_scratch` partial — but only the V half.
+        // We can't call the helper as-is because it bundles V+H. So
+        // we inline the V-axis pass by hand here.
+        let params_v_inv = self
+            .fft2d
+            .axis(FftAxis::V)
+            .upload_params(ctx, FftParams::new(n, n, FftDirection::Inverse));
+
         for ki in 0..k {
+            // (a) Copy kernel ki's spectrum into inv_in.
             let slice_offset = (ki as u64) * (cells as u64) * 8;
             encoder.copy_buffer_to_buffer(
                 &self.k_spectra,
@@ -483,43 +659,45 @@ impl ConvolveFftPass {
                 0,
                 (cells * 8) as u64,
             );
-            self.fft2d.inverse_2d_with_scratch(
+            // (b) V-axis inverse: inv_in → scratch_complex.
+            let bg_v_inv = self.fft2d.axis(FftAxis::V).make_bind_group(
                 ctx,
-                encoder,
-                &self.twiddles,
                 &self.inv_in,
+                &self.twiddles,
                 &self.scratch_complex,
-                &self.spectrum_staging,
+                &params_v_inv,
             );
-            encoder.copy_buffer_to_buffer(
-                &self.spectrum_staging,
-                0,
-                &self.k_complex_out,
-                slice_offset,
-                (cells * 8) as u64,
+            self.fft2d.axis(FftAxis::V).record(encoder, &bg_v_inv, n);
+            // (c) Fused H-axis inverse + transpose: scratch_complex
+            //     → pre_g_out[*, *, ki] (real, cell-major).
+            let inv_pre_g_params = FftInvToPreGPass::upload_params(
+                ctx,
+                InvPreGParams::new(n, n, ki, k),
             );
+            let bg_inv_pre_g = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("fft_inv_to_pre_g bind group"),
+                layout: &self.inv_to_pre_g_pass.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.scratch_complex.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.twiddles.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: pre_g_out.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: inv_pre_g_params.as_entire_binding(),
+                    },
+                ],
+            });
+            self.inv_to_pre_g_pass.record(encoder, &bg_inv_pre_g, n);
         }
-
-        // 4. Layout transpose: K-major complex → cell-major real pre_g.
-        let bg_layout = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("fft_to_pre_g bind group"),
-            layout: &self.layout_pass.bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: self.k_complex_out.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: pre_g_out.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: self.layout_params_buf.as_entire_binding(),
-                },
-            ],
-        });
-        self.layout_pass.record(encoder, &bg_layout, n, k);
     }
 }
 
