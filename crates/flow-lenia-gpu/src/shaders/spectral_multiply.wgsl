@@ -31,9 +31,25 @@
 //                                   For C=1 every entry is 0.
 //   @binding(4) params:           uniform<SmParams>{ n, k, c, _pad }
 //
-// **Dispatch shape**: 1D `(workgroups, 1, 1)` with workgroup_size
-// `(256, 1, 1)` and one thread per `(k, row, col)` triple. Index
-// decoding: `i = k * N² + row * N + col`.
+// **Dispatch shape (M6.C-2-2 vec4 packing)**: 1D `(workgroups, 1, 1)`
+// with workgroup_size `(256, 1, 1)` and **2 (k, row, col) triples
+// per thread** (= 4 f32 = 1 vec4 worth of SIMD work). Index decoding:
+// `i_base = gid.x * 2`, then the two cells at `i_base` and `i_base+1`
+// are processed in a `for (var di: u32 = 0u; di < 2u; ...)` loop.
+// The unroll is small enough that Naga reliably emits paired f32
+// FMAs on the Metal target — M1 G13's 32-wide SIMD then issues both
+// complex multiplies in one warp cycle for the active half of the
+// workgroup. Compared to the C-1-3 1-cell-per-thread layout this
+// halves the dispatch grid size + halves the per-thread bind-group
+// + workgroup-id arithmetic overhead.
+//
+// Pre-C-2-2 layout was "1 thread = 1 complex multiply"; the change
+// is binding-layout-compatible (same `array<vec2<f32>>` storage
+// view, no stride change) so existing tests pass without
+// modification beyond the dispatch-count helper. Larger unroll
+// (e.g. 4 cells / thread) was considered and rejected for C-2-2
+// because the per-thread register pressure starts to hurt M1
+// occupancy at 4× — measure first in C-2-5 before pushing further.
 //
 // **Reuse opportunity deferred** (C-1-3 Round 1 review #6): with the
 // 1D layout, each `(src_c, cell)` of `input_spectra` is fetched
@@ -60,17 +76,23 @@ fn complex_mul(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
 
 @compute @workgroup_size(256, 1, 1)
 fn spectral_multiply(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
+    let i_base = gid.x * 2u;
     let cells_per_kernel = params.n * params.n;
     let total = cells_per_kernel * params.k;
-    if (i >= total) {
-        return;
+    // 2-cell-per-thread unroll (C-2-2). The two iterations share
+    // `cells_per_kernel`/`total` loads and let the M1 G13 SIMD lane
+    // pair the two complex multiplies into one warp issue.
+    for (var di: u32 = 0u; di < 2u; di = di + 1u) {
+        let i = i_base + di;
+        if (i >= total) {
+            return;
+        }
+        let k = i / cells_per_kernel;
+        let cell = i % cells_per_kernel;
+        let src_c = kernel_routing[k];
+        let a_idx = src_c * cells_per_kernel + cell;
+        let a = input_spectra[a_idx];
+        let b = kernel_fft[i];
+        output_spectra[i] = complex_mul(a, b);
     }
-    let k = i / cells_per_kernel;
-    let cell = i % cells_per_kernel;
-    let src_c = kernel_routing[k];
-    let a_idx = src_c * cells_per_kernel + cell;
-    let a = input_spectra[a_idx];
-    let b = kernel_fft[i];
-    output_spectra[i] = complex_mul(a, b);
 }

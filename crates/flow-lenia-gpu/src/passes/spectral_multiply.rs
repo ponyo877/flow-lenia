@@ -209,6 +209,10 @@ impl SpectralMultiplyPass {
     }
 
     /// Dispatch enough workgroups to cover `n * n * k` complex cells.
+    /// M6.C-2-2: each thread now processes **2 cells**, so the
+    /// dispatch is sized by `total / 2` (rounded up), then up to
+    /// workgroup count. The 2-cell unroll lives in WGSL — see
+    /// `spectral_multiply.wgsl` header for the vec4-packing rationale.
     pub fn record(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -217,7 +221,8 @@ impl SpectralMultiplyPass {
         k: u32,
     ) {
         let total = n * n * k;
-        let groups = total.div_ceil(WORKGROUP_X);
+        let threads = total.div_ceil(2);
+        let groups = threads.div_ceil(WORKGROUP_X);
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("spectral_multiply pass"),
             timestamp_writes: None,
