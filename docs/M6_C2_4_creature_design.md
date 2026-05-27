@@ -76,6 +76,84 @@ case δ + Eq. 8 defer に基づく:
   average)
 - M5 で Eq. 8 を実装する hook point を WGSL コメント + Rust API で明示
 
+#### 案 (a) identity-copy + M5 hook 採用 (2026-05-28 Ponyo877 さん判断)
+
+ReintegratePass の精査で M2.7 から「matter (A) のみを receiver-side dd×dd
+loop で集める」設計のため、matter + P 同時 flow の binding 拡張が
+不可避と判明。3 案 (a/b/c) のうち以下の理由で案 (a) を採用:
+
+| 案 | 内容 | 判定 |
+|---|---|---|
+| (a) | 新規 `ParameterFlowPass` (identity copy + M5 hook) | **採用** |
+| (b) | 新規 `ParameterFlowPass` (deterministic weighted-average) | 不採用 (paper に存在しない中間 algorithm、scope creep) |
+| (c) | ReintegratePass 自体に P slot を追加 (binding 拡張) | 不採用 (production caller 全破壊、Stage 1 中間評価前の baseline 変更不可) |
+
+採用理由:
+1. 「Eq. 8 defer to M5」決定との整合 (infrastructure のみ、algorithm 不変)
+2. ReintegratePass の数値検証保護 (M2.7 baseline、Layer 1-5 anchor 維持)
+3. M5 hook 接続の明快さ (shader 内 hook block に softmax 追加で Eq. 8 完成)
+
+実装結果 (M6.C-2-4-c commit):
+- `crates/flow-lenia-gpu/src/shaders/parameter_flow.wgsl`: identity-copy
+  WGSL + M5 hook block コメント
+- `crates/flow-lenia-gpu/src/passes/parameter_flow.rs`: `ParameterFlowPass`
+  struct + 2 unit tests (identity property + ping-pong 10-step
+  preservation)
+
+### M5 hook specification (Eq. 8 stochastic sampling)
+
+ParameterFlowPass の binding contract は **M5 で変更しない** ことを
+前提に以下を確定。M5 着手時は WGSL body だけ rewrite すれば Eq. 8
+完成。
+
+#### Binding contract (M5 まで frozen)
+
+| binding | name | type | M6.C-2-4-c 使用 | M5 使用 |
+|---|---|---|---|---|
+| 0 | `p_in` | `array<f32>`, read | source P map | source P map (sampling 元) |
+| 1 | `p_out` | `array<f32>`, read_write | destination P map (identity copy 出力) | destination P map (sampled 結果) |
+| 2 | `matter_flow` | `array<f32>` (C, H, W, 2), read | (未使用) | Eq. 8 softmax の入力 (incoming mass per neighbour) |
+| 3 | `kernel_routing` | `array<u32>` length K, read | (未使用) | creature 識別 (M5 で creature-competition semantics に拡張) |
+| 4 | `globals` | uniform | W, H, C, K, dd, dt, … | 同左 |
+
+#### M5 で WGSL に書く Eq. 8 algorithm (plantec 2025)
+
+```wgsl
+// M5 plan: Replace identity copy with:
+for each cell x:
+    let in_mass = Σ_y  incoming_mass(y -> x)   // from matter_flow binding
+    let weights[y] = softmax(incoming_mass(y -> x) / in_mass)
+    sample y* ~ Categorical(weights)
+    P_out[x] = P_in[y*]
+```
+
+#### M5 で追加が必要な要素
+
+- WGSL: identity-copy body を Eq. 8 softmax sampling に置換
+- M5 で **RNG state buffer** を新規 binding 5 として追加する可能性あり
+  (今は frozen contract に含めない、M5 で binding 増設は WGSL 側の
+  bind group layout 変更だけで対応可能)
+- Rust 側 pipeline shape 変更は不要 (record / make_bind_group は M5
+  でも同 API のまま)
+
+#### Hook 設計の前提
+
+- ParameterFlowPass の matter_flow と kernel_routing binding は M6.C-2-4-c
+  時点で未使用だが、最初から bind group に含めることで M5 で
+  Rust 側修正なしに使用可能
+- ReintegratePass との dispatch 順序: matter flow 計算 (Eq. 6) →
+  parameter flow 計算 (Eq. 8) — M5 で確定 (現状は parameter_flow が
+  identity なので順序非依存)
+- M5 で追加するのは WGSL shader の中身のみ、pipeline 構造は維持
+
+#### M5 着手時の作業範囲 estimate
+
+- WGSL Eq. 8 algorithm 実装 (0.5 日)
+- WGSL RNG state binding 追加 (必要なら、0.5 日)
+- 単体テスト (deterministic seed で sampling 結果 anchor、0.5 日)
+- ReintegratePass との順序確定 + pipeline 配線 (0.5 日)
+- 合計: 2 日 (M5 進化的探索の中核 sub-step 1 つに相当)
+
 ### C-2-4-d: 4 creature 動作確認 + visual smoke test (0.5 日)
 - 4 patches × distinct P vectors で動作
 - assert_creature_alive 全 creature 生存確認
@@ -138,4 +216,7 @@ Phase 3 自走実施。
 ## 関連 commit
 
 - `3fefd44` (M6.C-2-4a): Plantec paper PDF 直接読了、case α 不一致発覚
-- 本 commit (M6.C-2-4a 戦略確定): Ponyo877 さん戦略判断確定 + 計画更新
+- `fbc7ed2` (M6.C-2-4a 戦略確定): Ponyo877 さん戦略判断確定 + 計画更新
+- `afa7259` (M6.C-2-4-a): parameter map P storage + helpers
+- `566654c` (M6.C-2-4-b): parameter_map → affinity_localized bridge test
+- 本 commit (M6.C-2-4-c): ParameterFlowPass identity-copy + M5 hook

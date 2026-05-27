@@ -14,6 +14,7 @@ pub mod fft;
 pub mod flow;
 pub mod gradient;
 pub mod kernel_fft;
+pub mod parameter_flow;
 pub mod parameter_map;
 pub mod reintegrate;
 pub mod spectral_multiply;
@@ -30,6 +31,7 @@ pub use fft::{
 };
 pub use convolve_fft::{ConvolveFftPass, FftToPreGPass, PreGParams};
 pub use kernel_fft::{build_padded_kernel, precompute_kernel_ffts, KernelFftBuffers};
+pub use parameter_flow::ParameterFlowPass;
 pub use parameter_map::{build_for_patches, upload as upload_parameter_map, CreaturePatch};
 pub use spectral_multiply::{SpectralMultiplyParams, SpectralMultiplyPass};
 pub use flow::FlowPass;
