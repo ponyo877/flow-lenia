@@ -72,6 +72,15 @@
     後の C-2 perf phase で実施 (本 Rev 4.7 は Amdahl extrapolation のみ)
   - kernel routing UI invalidate (param-painting M5 candidate) は M6.C-4 /
     M5 で対応 (`update_globals` rustdoc TODO 既記載)
+- **M6.C-2-4 4 creature 実装方式確定 (戦略判断 2026-05-27)**:
+  - **case δ (paper-faithful parameter map P infrastructure)** 採用
+  - **Eq. 8 stochastic sampling は M5 defer** (進化的探索の核心、文脈
+    として M5 で実装が自然)
+  - creature 数 4 維持 (M6.C-1 計画書通り、64 は計算量 unknown)
+  - 詳細は `docs/M6_C2_4_creature_design.md` 参照
+  - scope-guardian 元 approve (case α) は Plantec paper PDF 本文直接読了
+    で覆った retro: `CLAUDE.md` "Subagent 判定の事後検証 (M6.C-2-4 retro)"
+    節に教訓記録
 
 ### Rev.4.6 (2026-05、M6.A 検証基盤完了)
 
