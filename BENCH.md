@@ -1049,12 +1049,123 @@ paired-run + N=3 median は bench_fft_vs_direct のみ):
 - Stage 1 判断 (撤退 / 継続 / 縮小 / 目標再評価) は Ponyo877 さん責任、
   C-1-6 commit + push 後 Phase 3 改訂条件 1 で Claude Web 送信
 
+## Section 15 — M6.C-2-5 paired-run measurement (5 configs) + Stage 1 中間評価入力
+
+M6.C-2 (kernel fusion + parameter map P infra) 完了直前の measurement。
+**Stage 1 中間評価の核心 input section** — 戦略判断は Ponyo877 さん責任、
+本 section は measured data + assumptions の honest framing に留める。
+
+### 測定環境
+
+- Apple M1 (Metal)、quiesced state (Ponyo877 さん trunk serve / cargo /
+  browser 停止確認済)
+- `bench_c2_configs` binary、CLAUDE.md §測定プロトコル準拠
+- paired interleave (D F D F …)、N=3 trials median、warmup 20 step
+- N=64: 100 measured steps、N=256: 50 measured steps
+- K=10、Torus、seed=1729
+
+### 測定結果 (median)
+
+| # | config | ms/step | sps | FFT/Direct ratio | direct ms |
+|---|---|---|---|---|---|
+| 1 | N=64  C=1 fft | 1.574 | 635.4 | 8.507× | 13.390 |
+| 2 | N=64  C=3 fft | 1.934 | 517.1 | 8.573× | 16.580 |
+| 3 | N=256 C=1 fft | 5.180 | 193.1 | **36.495×** | 189.032 |
+| 4 | N=256 C=3 fft | 6.861 | 145.7 | **33.917×** | 232.716 |
+| 5 | N=256 C=3 4-creature localized | **6.840** | **146.2** | localized/constant 1.063× | — |
+
+各 trial の variance は ±5-10% (例: config 1 ratio = 9.17 / 8.51 /
+8.42×)、median で吸収。
+
+### 主要観察
+
+1. **Stage 1 撤退ライン圧倒的クリア** (config 5 = 核心):
+   - 撤退ライン "256×256×C3×4creature で 30 FPS" = 33.3 ms/step
+   - 実測 **6.840 ms/step (146 sps)** = 撤退ライン **4.87× 上回る**、
+     60 FPS 目標 (16.7 ms) も **2.44× 上回る**
+   - §14 の Amdahl extrapolation "N=256/C=3/fft 46-77 ms/step (13-22
+     sps)、撤退ライン marginal" は **大幅に悲観的**だった (後述 2)
+
+2. **N=256 FFT-vs-Direct ratio = 34× が §14 予測 (3-5×) を 7-10× 超過**:
+   - §14 は「N 増で convolve compute が dominant → FFT-vs-Direct ratio
+     が下がる」と仮定 (line 974-978)、actual は **逆**
+   - Direct は per-cell O(kernel_area × K × C)、N=256 で kernel ~33² ≈
+     1089 cell × K=10 × C=3 の inner loop が catastrophic (232 ms/step)
+   - FFT は O(N² log N × K)、log N scaling で N 増の劣化が緩やか
+     (5.18 / 6.86 ms/step)
+   - 結果 ratio は N=64 の 8.5× → N=256 の 34× へ **増加**
+   - 教訓: §14 の extrapolation は Direct の kernel-area scaling を
+     過小評価。実測が必須だった (extrapolation の honest framing の
+     正しさを裏付け)
+
+3. **C-2 perf micro-opt (C-2-1-a fused inverse + C-2-2 SM unroll) の
+   end-to-end 効果 ≈ ゼロ (thermal noise band 内)**:
+   - 方法論: Direct path は C-2 で不変 → 同一セッションの FFT/Direct
+     ratio を §14 C-1 baseline ratio で割れば、Direct を anchor として
+     cross-session thermal がキャンセル (ratio-of-ratios)
+   - N=64 C=1: current 8.507× ÷ §14 8.206× = **C-2 speedup 1.037×**
+   - N=64 C=3: current 8.573× ÷ §14 8.655× = **C-2 speedup 0.991×**
+   - 両者とも ±10% thermal noise band 内 = **有意な end-to-end 改善なし**
+   - 原因分析: C-2-1-a が削減した 11 dispatch/step の大半は
+     `copy_buffer_to_buffer` (10 copies) + 1 transpose dispatch。Metal
+     上で buffer copy は数 μs と安価で、Maczan 32-71μs/dispatch は
+     compute dispatch の数字。FFT path は元々 dispatch-bound でなく
+     compute-bound (forward/inverse FFT 自体) のため、dispatch 削減の
+     限界効用が低い
+   - **C-2 ratio gate (≥ 1.5× 順調 / < 1.5× 早期撤退検討) に対し、
+     C-2-1-a + C-2-2 のみでは 1.0× = gate 未達**。ただし M6.B literature
+     survey §7.1 の「1.5-2×」予測は kernel fusion + **subgroup reduction**
+     (C-2-3、未実装) を含む想定。実装した micro-opt 2 つだけでは届かない
+     のは整合的
+
+4. **localized 4-creature overhead = 1.063× (6.3%)**:
+   - config 5 (localized) vs config 4 (constant) 同 N=256 C=3
+   - parameter map P (2.5 MB at N=256 K=10) read + ParameterFlowPass
+     identity-copy dispatch の追加コストが 6.3% のみ
+   - Plantec §3.1 parameter map P infra は実用上 negligible overhead
+     で 4 creature を表現可能 (case δ paper-faithful 設計の妥当性裏付け)
+
+### Stage 1 中間評価への input (Ponyo877 さん判断材料)
+
+**撤退ライン判定** (CLAUDE.md "256×256×3×4creature で 30 FPS なら M5 へ"):
+- **PASS 圧倒的** — 146 sps (6.84 ms/step) は 30 FPS の 4.87×、60 FPS の
+  2.44×。M5 進行は measured data 上明確に正当
+
+**最終ゴール (512×512×4creature 60 FPS) への含意**:
+- 512 は radix-4 FFT 非対応 (SUPPORTED_N = {64, 256}、512 = 2^9 は
+  power-of-4 でない)。現状 512 は Direct fallback = 推定 ~930 ms/step
+  (256 Direct 232ms × 4× cells) で全く届かない
+- 512 で 60 FPS を狙うには **mixed-radix FFT (radix-2 fall-out stage)**
+  が必須。これは M6.C-1-2 で scope-guardian deferred、別 work item
+- N=256 で 146 sps の余裕があるため、512 (4× cells) で FFT 化できれば
+  naive には ~37 sps 圏内、最終ゴール 60 FPS は mixed-radix + C-2/C-3
+  追加最適化で射程に入る可能性
+
+**C-2 残 sub-step の限界効用評価**:
+- C-2-1-a + C-2-2 が end-to-end ~0× だった事実から、残る
+  C-2-1-b (forward H+V fusion) も同様に dispatch 削減系で限界効用低い見込み
+- C-2-3 (subgroup reduction) は spectral multiply の reduction を
+  subgroup intrinsics 化する別系統で、効果は未知数だが、**N=256 で既に
+  撤退ライン 4.87× クリア済みのため緊急性は低い**
+- mixed-radix FFT (512 対応) の方が最終ゴールへの寄与が大きい可能性
+
+**まとめ** (Claude Code 判断ではなく measured data の framing):
+- N=256/C=3/4creature = 146 sps、撤退ライン 4.87× クリア → M5 進行正当
+- C-2 perf micro-opt (C-2-1-a/2) は end-to-end ~0× (FFT が dispatch-bound
+  でないため)、ただし機能 (C-2-4 parameter map P) は 6.3% 安価で動作
+- N=256 FFT-vs-Direct = 34× は §14 予測を大きく上回る正の驚き
+- 最終ゴール 512 は mixed-radix FFT 必須 (現状 scope 外)
+- Stage 1 判断 (M5 進行 / C-2 残継続 / mixed-radix 優先 / 目標再評価) は
+  Ponyo877 さん責任、本 measurement を Phase 3 改訂条件 2 (早期撤退ゲート:
+  C-2 ratio < 1.5×) で Claude Web 送信
+
 ## Re-running
 
 ```sh
 cargo run --release --bin bench_step
 cargo run --release --bin bench_fft_vs_direct
 cargo run --release --bin bench_long_horizon_fft
+cargo run --release --bin bench_c2_configs
 ```
 
 Output goes to stderr in markdown-ready table format; redirect or
