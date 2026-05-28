@@ -76,7 +76,9 @@
 //! must include this overhead in the early-exit gate ratio (do
 //! not mistake it for FFT compute cost).
 
-use crate::passes::fft::{precompute_twiddles_1d, Fft2dPass, FftAxis, FftDirection, FftParams};
+use crate::passes::fft::{
+    is_supported_mixed_n, precompute_twiddles_1d, Fft2dPass, FftAxis, FftDirection, FftParams,
+};
 use crate::passes::spectral_multiply::{SpectralMultiplyParams, SpectralMultiplyPass};
 use crate::GpuContext;
 use bytemuck::{Pod, Zeroable};
@@ -119,12 +121,27 @@ pub struct FftInvToPreGPass {
 impl FftInvToPreGPass {
     #[must_use]
     pub fn new(ctx: &GpuContext, n: u32) -> Self {
-        const SOURCE: &str = include_str!("../shaders/fft_1d_radix4_inv_to_pre_g.wgsl");
+        // M6.C-3-2: route N = 2×4^k (512 etc.) to the mixed-radix
+        // inverse+transpose shader; pure powers of 4 (64/256) keep the
+        // radix-4 shader. Entry point differs per shader.
+        let (source, entry, label) = if is_supported_mixed_n(n) {
+            (
+                include_str!("../shaders/fft_1d_radix2x4_inv_to_pre_g.wgsl"),
+                "fft_1d_radix2x4_inv_to_pre_g",
+                "fft_1d_radix2x4_inv_to_pre_g.wgsl",
+            )
+        } else {
+            (
+                include_str!("../shaders/fft_1d_radix4_inv_to_pre_g.wgsl"),
+                "fft_1d_radix4_inv_to_pre_g",
+                "fft_1d_radix4_inv_to_pre_g.wgsl",
+            )
+        };
         let shader = ctx
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("fft_1d_radix4_inv_to_pre_g.wgsl"),
-                source: wgpu::ShaderSource::Wgsl(SOURCE.into()),
+                label: Some(label),
+                source: wgpu::ShaderSource::Wgsl(source.into()),
             });
         let bind_group_layout =
             ctx.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -184,7 +201,7 @@ impl FftInvToPreGPass {
                 label: Some(&format!("fft_inv_to_pre_g pipeline (N={n})")),
                 layout: Some(&pipeline_layout),
                 module: &shader,
-                entry_point: Some("fft_1d_radix4_inv_to_pre_g"),
+                entry_point: Some(entry),
                 compilation_options: wgpu::PipelineCompilationOptions {
                     constants: &constants,
                     zero_initialize_workgroup_memory: false,

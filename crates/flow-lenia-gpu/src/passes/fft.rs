@@ -117,6 +117,20 @@ pub fn is_supported_mixed_n(n: u32) -> bool {
     SUPPORTED_MIXED_N.contains(&n)
 }
 
+/// Grids the FFT-mode **pipeline** (`ConvolveFftPass` + `GpuStepPipeline`
+/// `Auto`) routes through end-to-end: pure radix-4 {64, 256} plus
+/// **512** (mixed-radix, wired in M6.C-3-2 for the 512×512 hi-end
+/// goal). The mixed primitive *also* compiles for 8/32/128, but the
+/// pipeline intentionally keeps those on the Direct fallback — routing
+/// them through FFT would change the existing M6.A snapshot /
+/// regression baselines generated with Direct, and they are not a
+/// performance target. Extend this set only with a deliberate
+/// baseline-regeneration plan.
+#[must_use]
+pub fn is_fft_pipeline_grid(n: u32) -> bool {
+    is_supported_n(n) || n == 512
+}
+
 /// Compiled 1D radix-4 FFT pass for a single axis. C-1-1 callers
 /// instantiate this directly via [`FftPass::new_h`]; C-1-2 callers
 /// should prefer [`Fft2dPass`] which owns both H and V passes.
@@ -185,6 +199,25 @@ impl FftPass {
             include_str!("../shaders/fft_1d_radix2x4.wgsl"),
             "fft_1d_radix2x4",
             "fft_1d_radix2x4.wgsl",
+        )
+    }
+
+    /// M6.C-3-2 mixed-radix V-axis (column-stride) variant for
+    /// `N = 2 × 4^k`. Pairs with [`new_h_mixed`](Self::new_h_mixed)
+    /// inside [`Fft2dPass::new`] for 512×512 2D transforms.
+    #[must_use]
+    pub fn new_v_mixed(ctx: &GpuContext, n: u32) -> Self {
+        assert!(
+            is_supported_mixed_n(n),
+            "FftPass::new_v_mixed supports N ∈ {SUPPORTED_MIXED_N:?} \
+             (= 2 × 4^k) (got {n}); pure powers of 4 use FftPass::new_v."
+        );
+        Self::compile(
+            ctx,
+            n,
+            include_str!("../shaders/fft_1d_radix2x4_v.wgsl"),
+            "fft_1d_radix2x4_v",
+            "fft_1d_radix2x4_v.wgsl",
         )
     }
 
@@ -380,14 +413,25 @@ pub struct Fft2dPass {
 
 impl Fft2dPass {
     /// Build both axis passes for transform length `n`. `n` must be
-    /// in [`SUPPORTED_N`].
+    /// in [`SUPPORTED_N`] (pure radix-4: 64/256) **or**
+    /// [`SUPPORTED_MIXED_N`] (mixed-radix 2×4^k: 8/32/128/512). The
+    /// mixed sizes (M6.C-3-2) route to `fft_1d_radix2x4{,_v}.wgsl`;
+    /// pure powers of 4 keep the original radix-4 shaders. All
+    /// downstream `Fft2dPass` methods are shader-agnostic (they only
+    /// call `self.h` / `self.v`).
     #[must_use]
     pub fn new(ctx: &GpuContext, n: u32) -> Self {
-        Self {
-            n,
-            h: FftPass::new_h(ctx, n),
-            v: FftPass::new_v(ctx, n),
-        }
+        let (h, v) = if is_supported_n(n) {
+            (FftPass::new_h(ctx, n), FftPass::new_v(ctx, n))
+        } else if is_supported_mixed_n(n) {
+            (FftPass::new_h_mixed(ctx, n), FftPass::new_v_mixed(ctx, n))
+        } else {
+            panic!(
+                "Fft2dPass::new: N={n} not in SUPPORTED_N {SUPPORTED_N:?} \
+                 nor SUPPORTED_MIXED_N {SUPPORTED_MIXED_N:?}"
+            );
+        };
+        Self { n, h, v }
     }
 
     /// Pick the per-axis sub-pass.
@@ -1064,6 +1108,42 @@ mod tests {
         }
     }
 
+    /// M6.C-3-2: 2D round-trip at **N=512** (mixed-radix). Exercises
+    /// the full `Fft2dPass::new(512)` → mixed H + mixed V forward,
+    /// then mixed V + mixed H inverse, column-stride and row-stride
+    /// both. This is the 2D-orchestration correctness anchor for the
+    /// 512 hi-end mode before the ConvolveFftPass / pipeline wiring.
+    #[test]
+    fn fft_2d_round_trip_n512() {
+        let (ctx, guard) = headless_ctx();
+        let pass2d = Fft2dPass::new(&ctx, 512);
+        let twiddles = precompute_twiddles_1d(&ctx, 512);
+
+        let mut rng = ChaCha8Rng::seed_from_u64(0xF7_2D_512);
+        let n: u32 = 512;
+        let input: Vec<f32> = (0..(n * n) as usize)
+            .map(|_| rng.gen_range(-1.0_f32..1.0))
+            .collect();
+
+        let roundtrip = run_round_trip_2d(&ctx, &pass2d, &twiddles, &input, n);
+
+        let mut max_abs = 0.0_f32;
+        for (i, (&r, &orig)) in roundtrip.iter().zip(input.iter()).enumerate() {
+            let abs_err = (r - orig).abs();
+            max_abs = max_abs.max(abs_err);
+            assert!(
+                abs_err < 1e-4,
+                "2D round-trip N=512 mismatch at idx {i}: roundtrip={r} orig={orig} \
+                 abs={abs_err:.3e}"
+            );
+        }
+        eprintln!("[M6.C-3-2] fft_2d round-trip N=512 : max_abs={max_abs:.3e}");
+
+        if let Some(g) = &guard {
+            g.assert_no_errors();
+        }
+    }
+
     /// 2D forward output matches rustfft's separable two-pass output.
     /// This is the canonical correctness gate; the round-trip tests
     /// catch sign-convention bugs but cannot distinguish "GPU and
@@ -1128,6 +1208,22 @@ mod tests {
         let (max_abs, max_rel) = run_forward_vs_rustfft_2d(0xF7_2D_F064, 64);
         eprintln!(
             "[M6.C-1-2] fft_2d vs rustfft N=64  : max_abs={max_abs:.3e}  max_rel={max_rel:.3e}"
+        );
+    }
+
+    /// M6.C-3-2: **independent 2D forward witness at N=512** vs
+    /// rustfft. This is the canonical correctness gate (the round-trip
+    /// test only proves GPU forward/inverse are mutual inverses — it
+    /// cannot catch a forward-only V-mixed column-stride bug that the
+    /// inverse exactly undoes). The mixed-H forward is witnessed at 1D
+    /// (`fft_1d_mixed_matches_rustfft_n512`); this closes the gap for
+    /// the mixed-V column-stride forward + the full 2D composition.
+    /// (adversarial-reviewer C-3-2 required measurement.)
+    #[test]
+    fn fft_2d_forward_matches_rustfft_n512() {
+        let (max_abs, max_rel) = run_forward_vs_rustfft_2d(0xF7_2D_F512, 512);
+        eprintln!(
+            "[M6.C-3-2] fft_2d vs rustfft N=512 : max_abs={max_abs:.3e}  max_rel={max_rel:.3e}"
         );
     }
 

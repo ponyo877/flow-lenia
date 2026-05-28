@@ -1290,13 +1290,84 @@ subgroup / mixed-precision を 512 で「60 FPS 達成に必要」に転用:
   1.5-2× × mixed-precision 1.3-1.5× × workgroup tuning 1.2-1.5× =
   2.34-4.5×) で射程内
 
+## Section 17 — M6.C-3-2 Stage 2 中間評価 (naive 512 mixed-radix FFT)
+
+M6.C-3-1 (N=512 mixed-radix FFT primitive) を 2D + ConvolveFftPass +
+pipeline に配線し (C-3-2)、**追加最適化前 (naive) の 512 性能**を測定。
+512 高性能エンジン (最終ゴール 512×512×4creature×60FPS) の到達可能性
+判定が目的。
+
+### 測定環境
+
+- Apple M1 (Metal)、`bench_c2_configs` (512 section 追加)、CLAUDE.md
+  §測定プロトコル準拠 (paired/N=3 median/warmup 20)。512 は Direct が
+  ~930 ms/step で実用外のため **FFT-only 測定** (Direct paired なし)
+- N=512 は 50 measured steps
+
+### 測定結果 (median、FFT mode)
+
+| config | grid | C | mode | ms/step | sps |
+|---|---|---|---|---|---|
+| 6 | 512 | 3 | fft constant | 23.31 | 42.9 |
+| 7 | 512 | 3 | fft **4-creature localized** | **24.68** | **40.5** |
+
+(同セッションの 256 再測定: config 4 N=256/C=3 = 6.53 ms/153 sps、
+config 5 localized = 6.64 ms/151 sps、§15 と整合。C-2 FFT speedup
+再確認 N=64 = 1.007×/1.003× = noise band 内、§16 の ~0× 結論を再追認)
+
+### Stage 2 中間評価 (Ponyo877 さん判断材料)
+
+判定基準 (DESIGN Rev.4.8 §8 M6.C-3-2):
+- ≥ 40 sps → subgroup + mixed-precision で 60 FPS 確実
+- 30-40 sps → 全 deferred 手法必要、続行
+- 20-30 sps → 1.85× 境界、慎重続行
+- < 20 sps → mixed-radix FFT 実装に問題、要調査
+
+**結果: config 7 = 40.5 sps → 最良バケット (≥ 40 sps)**。最終ゴール
+60 FPS (16.7 ms) まで残り **1.48×**。
+
+**1.48× 達成の見通し (honest framing — これは見積もりであり実測でない)**:
+deferred 手法の高速化係数 (subgroup 1.5-2× / mixed-precision 1.3-1.5× /
+workgroup tuning 1.2-1.5×) は **いずれも 512 で未実測**。M6.B 文献
+survey の一般的レンジで、本プロジェクトの 512 spectral-multiply /
+FFT に適用した時の実効値は C-3-3〜C-3-5 で測定するまで不明。さらに
+C-2-1-a/C-2-2 が「FFT は compute-bound で dispatch 削減の限界効用低」
+(§16) だった前例から、subgroup reduction も期待下限に留まる可能性は
+ある。よって「1.48× は射程内の蓋然性が高い」が正確な表現で、確定では
+ない。各手法適用ごとに実測し、届いた最高 FPS で確定する (案 a)。
+
+### 主要観察
+
+1. **mixed-radix FFT が naive で 40.5 sps 達成**: 512² Direct は
+   ~930 ms/step (256 Direct 230ms × 4 cells) で全く不可能だった領域。
+   radix-4×4 + radix-2×1 の mixed-radix が 512 を FFT 化し、512² で
+   40 sps を実現
+2. **512 naive 外挿の検証 (provisional)**: §16 で「256 6.84 ms → 512
+   O(N²logN) で 4.5× = ~30.8 ms (32 sps)」と予測。実測 24.68 ms
+   (40.5 sps) は予測より良い (256 localized 6.64ms の 3.7×)。考えられる
+   要因は mixed-radix radix-2 段の効率性 or N=256→512 per-pass overhead
+   増が予想より小だが、**これは N=3 median 1 データ点・Direct paired
+   なし (Direct 512 が ~930ms で実用外のため)** なので provisional。
+   C-3-3 以降の measurement で安定性を確認する
+3. **localized overhead at 512 = 1.059×** (24.68/23.31): 256 の 1.062×
+   と同等、parameter map P infra は 512 でも安価
+4. **数値正確性**: 512 mixed-radix は 2D round-trip max_abs 4.8e-7、
+   pipeline FFT-vs-Direct (C=1 2-step) max_rel 1.1e-3 (A.4.5 tiered
+   512 tolerance 5e-3 内) で Direct と一致確認 (Layer 3 相当)
+
+### 残り (C-3-3 以降)
+
+40.5 sps → 60 fps は subgroup reduction (C-3-3) + mixed-precision
+(C-3-4) + workgroup tuning (C-3-5) で 1.48× を獲得。各手法適用ごとに
+512 FPS 測定、60 fps 達成時点で残り skip (案 a、届いた最高 FPS で確定)。
+
 ## Re-running
 
 ```sh
 cargo run --release --bin bench_step
 cargo run --release --bin bench_fft_vs_direct
 cargo run --release --bin bench_long_horizon_fft
-cargo run --release --bin bench_c2_configs
+cargo run --release --bin bench_c2_configs   # 512 Stage 2 を含む
 ```
 
 Output goes to stderr in markdown-ready table format; redirect or

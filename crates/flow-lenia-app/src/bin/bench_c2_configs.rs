@@ -298,6 +298,28 @@ fn main() {
         lsps = 1000.0 / loc_fft_median,
     );
 
+    // ── M6.C-3-2 Stage 2: naive 512 FFT-only (Direct at 512 is
+    //    ~930 ms/step = unusable, so we measure FFT absolute only).
+    //    config 6 = N=512 C=3 constant, config 7 = N=512 C=3
+    //    4-creature localized (Stage 2 核心). ──────────────────────
+    eprintln!("\n=== N=512 C=3 FFT-only (naive, Stage 2) (×{N_TRIALS}) ===");
+    let mut c512_const: Vec<f64> = Vec::with_capacity(N_TRIALS);
+    let mut c512_loc: Vec<f64> = Vec::with_capacity(N_TRIALS);
+    for trial in 0..N_TRIALS {
+        let cst = measure_constant(&ctx, 512, 3, ConvolveMode::Fft);
+        c512_const.push(cst);
+        let loc = measure_localized_four_creature(&ctx, 512, 3);
+        c512_loc.push(loc);
+        eprintln!(
+            "  trial {trial}: constant={cst:.3} ms ({csps:.1} sps)  \
+             localized={loc:.3} ms ({lsps:.1} sps)",
+            csps = 1000.0 / cst,
+            lsps = 1000.0 / loc,
+        );
+    }
+    let c512_const_median = median(&mut c512_const);
+    let c512_loc_median = median(&mut c512_loc);
+
     // ── Summary ───────────────────────────────────────────────
     eprintln!("\n========== SUMMARY ==========");
     eprintln!(
@@ -332,6 +354,16 @@ fn main() {
         loc_fft_median,
         1000.0 / loc_fft_median,
         loc_overhead
+    );
+    eprintln!(
+        "config 6  N=512 C=3 fft (constant)       : {:.3} ms ({:.1} sps)",
+        c512_const_median,
+        1000.0 / c512_const_median,
+    );
+    eprintln!(
+        "config 7  N=512 C=3 4-creature localized : {:.3} ms ({:.1} sps)  ← Stage 2 核心",
+        c512_loc_median,
+        1000.0 / c512_loc_median,
     );
 
     // ── C-2 FFT speedup vs C-1 (Direct-anchored) ──────────────
@@ -374,6 +406,32 @@ fn main() {
         "config 5 (N=256 C=3 4-creature)    : {:.3} ms → {}  ← Stage 1 核心",
         loc_fft_median,
         verdict(loc_fft_median)
+    );
+
+    // ── M6.C-3-2 Stage 2 中間評価 (naive 512、追加最適化前) ──────
+    eprintln!("\n========== M6.C-3-2 Stage 2 中間評価 (naive 512) ==========");
+    let sps_512_loc = 1000.0 / c512_loc_median;
+    let stage2_verdict = if sps_512_loc >= 40.0 {
+        "≥40 sps: subgroup + mixed-precision で 60 FPS 確実"
+    } else if sps_512_loc >= 30.0 {
+        "30-40 sps: 全 deferred 手法必要、続行"
+    } else if sps_512_loc >= 20.0 {
+        "20-30 sps: 1.85× 境界、慎重続行"
+    } else {
+        "<20 sps: mixed-radix FFT 実装に問題、要調査 (Phase 3 条件3)"
+    };
+    eprintln!(
+        "config 6 (N=512 C=3 constant)      : {:.3} ms ({:.1} sps)",
+        c512_const_median,
+        1000.0 / c512_const_median
+    );
+    eprintln!(
+        "config 7 (N=512 C=3 4-creature)    : {:.3} ms ({sps_512_loc:.1} sps) → {stage2_verdict}",
+        c512_loc_median,
+    );
+    eprintln!(
+        "  最終ゴール 512×512×4creature×60FPS (16.7 ms) まで残り {:.2}× 必要",
+        c512_loc_median / 16.67
     );
 
     eprintln!("\nNote: strategic call (撤退 / 継続 / 縮小 / 目標再評価) は Ponyo877 さん責任。");

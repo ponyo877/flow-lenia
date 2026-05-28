@@ -30,7 +30,7 @@ use crate::{
         affinity_growth::{upload_constant_weights, AffinityGrowthPass, GpuConstantWeights},
         convolve::ConvolvePass,
         convolve_fft::ConvolveFftPass,
-        fft::{is_supported_n, SUPPORTED_N},
+        fft::{is_fft_pipeline_grid, SUPPORTED_N},
         flow::FlowPass,
         gradient::GradientPass,
         kernel_fft::{precompute_kernel_ffts, KernelFftBuffers},
@@ -83,15 +83,17 @@ pub enum ConvolveMode {
 
 impl ConvolveMode {
     /// Auto-fallback resolution: `Auto` collapses to `Fft` when
-    /// `grid` is in `SUPPORTED_N`, else `Direct`. Explicit
-    /// `Direct` / `Fft` are passed through. Callers that explicitly
-    /// pick `Fft` for an unsupported grid will hit the FFT-side
-    /// assertion at `ConvolveFftPass::new` — that path is intentional.
+    /// `grid` is FFT-pipeline-capable ({64, 256} radix-4 + 512
+    /// mixed-radix, see [`is_fft_pipeline_grid`]), else `Direct`.
+    /// Explicit `Direct` / `Fft` are passed through. Callers that
+    /// explicitly pick `Fft` for an unsupported grid will hit the
+    /// FFT-side assertion at `ConvolveFftPass::new` — that path is
+    /// intentional.
     #[must_use]
     pub fn resolve(self, grid: u32) -> ConvolveMode {
         match self {
             ConvolveMode::Auto => {
-                if is_supported_n(grid) {
+                if is_fft_pipeline_grid(grid) {
                     ConvolveMode::Fft
                 } else {
                     ConvolveMode::Direct
@@ -315,10 +317,10 @@ impl GpuStepPipeline {
                 cfg.channels
             );
             assert!(
-                is_supported_n(cfg.grid_width),
-                "ConvolveMode::Fft requires cfg.grid_width ∈ {SUPPORTED_N:?} \
-                 (got {}); mixed-radix grid sizes (32, 128, 512) need a radix-2 \
-                 fall-out stage, out of scope per M6.C-1-2 scope-guardian.",
+                is_fft_pipeline_grid(cfg.grid_width),
+                "ConvolveMode::Fft requires cfg.grid_width ∈ {SUPPORTED_N:?} (radix-4) \
+                 or 512 (mixed-radix, M6.C-3-2) (got {}); 32/128 mixed-radix are \
+                 primitive-capable but kept on the Direct fallback in the pipeline.",
                 cfg.grid_width
             );
             assert_eq!(
@@ -1191,6 +1193,89 @@ mod tests {
     // M6.C-1-5-a で multi-channel 対応により obsolete、削除済。
     // C=3 + grid=64 で FFT mode は正常に構築・動作するようになった
     // (gpu_pipeline_fft_mode_matches_direct_n64_c3_short が新規 coverage)。
+
+    /// M6.C-3-2: end-to-end FFT-mode equivalence at **N=512** (mixed-
+    /// radix). Direct path is the trusted reference (validated vs CPU
+    /// at M2.8); this confirms the mixed-radix FFT pipeline
+    /// (ConvolveFftPass + Fft2dPass mixed H/V + FftInvToPreGPass mixed
+    /// + spectral multiply) produces the same field as Direct at the
+    /// 512 hi-end grid. **C=1, 2-step short horizon** — Direct at 512
+    /// is ~190 ms/step (BENCH §15) so we keep the step count minimal;
+    /// short horizon also keeps FFT-vs-Direct chaotic divergence below
+    /// the tolerance (A.4.5: chaos amplification grows with grid AND
+    /// horizon, so 2 steps at 512 is the analog of 5 steps at 64).
+    #[test]
+    fn gpu_pipeline_fft_mode_matches_direct_n512_c1_short() {
+        let (ctx, guard) = headless_ctx();
+        let cfg = FlowLeniaConfig {
+            grid_width: 512,
+            grid_height: 512,
+            channels: 1,
+            dt: 0.2,
+            sigma: 0.65,
+            n: 2.0,
+            beta_a: 2.0,
+            dd: 5,
+            num_kernels: 10,
+            paper_strict: false,
+            border: BorderMode::Torus,
+            mix_rule: MixRule::Stochastic,
+        };
+        let seed = 0x512_FE_C1_u64;
+        let cpu_init = FlowLeniaSimulator::new(cfg, seed);
+        let initial_a = cpu_init.activation().clone();
+        let kernel_params = cpu_init.kernel_params().clone();
+
+        let mut direct = GpuStepPipeline::new_with_mode(
+            &ctx,
+            &cfg,
+            &kernel_params,
+            &initial_a,
+            ConvolveMode::Direct,
+        );
+        let mut fft = GpuStepPipeline::new_with_mode(
+            &ctx,
+            &cfg,
+            &kernel_params,
+            &initial_a,
+            ConvolveMode::Fft,
+        );
+        assert_eq!(fft.convolve_mode(), ConvolveMode::Fft, "512 must route to Fft");
+
+        let n_steps: u32 = 2;
+        direct.run_steps(&ctx, n_steps);
+        fft.run_steps(&ctx, n_steps);
+
+        let direct_a = direct.readback_activation(&ctx);
+        let fft_a = fft.readback_activation(&ctx);
+
+        let mut max_abs = 0.0_f32;
+        let mut max_rel = 0.0_f32;
+        for ((y, x, ci), &d) in direct_a.indexed_iter() {
+            let f = fft_a[[y, x, ci]];
+            let abs_err = (d - f).abs();
+            let rel_err = abs_err / d.abs().max(1e-6);
+            max_abs = max_abs.max(abs_err);
+            max_rel = max_rel.max(rel_err);
+            // 512 short-horizon tolerance: A.4.5 tiered bound scaled up
+            // from g256 (2.5e-3). 2-step keeps actual divergence far
+            // below this; the bound is the regression ceiling, not the
+            // observed value (printed below).
+            assert!(
+                rel_err < 5e-3 || abs_err < 1e-5,
+                "({y}, {x}, c={ci}) after {n_steps} steps N=512: direct={d} fft={f} \
+                 abs={abs_err:.3e} rel={rel_err:.3e}"
+            );
+        }
+        eprintln!(
+            "[M6.C-3-2] pipeline direct vs fft N=512 C=1 K=10 Torus {n_steps}-step : \
+             max_abs={max_abs:.3e}  max_rel={max_rel:.3e}"
+        );
+
+        if let Some(g) = &guard {
+            g.assert_no_errors();
+        }
+    }
 
     /// M6.C-1-4-b: ConvolveMode::Fft must reject unsupported grid
     /// sizes (only {64, 256} pass; 32 / 128 / 512 are mixed-radix,
