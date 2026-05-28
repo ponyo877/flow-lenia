@@ -1,10 +1,60 @@
-# Flow-Lenia WebGPU Visualizer — 設計書 (Rev. 4.7)
+# Flow-Lenia WebGPU Visualizer — 設計書 (Rev. 4.8)
 
 本書は Rust + WebAssembly + WebGPU で **Flow-Lenia (Plantec et al., 2025, Artificial Life journal, arXiv:2506.08569v1)** を厳密に再現し、ブラウザ上でリアルタイム可視化する実装の設計書である。
 
 **実装の正典**は `papers/2506.08569v1.pdf` (2025年版) であり、Equation 番号は同論文を指す。副参照として `papers/2212.07906v2.pdf` (2023年版)、Moroz, 2020 "Reintegration tracking"、**公式 JAX 実装** `references/FlowLenia-jax/` (commit `dce428c`, 2024-02-08) を用いる。JAX 実装の精読結果は `references/JAX_NOTES.md` を参照。
 
 ## Rev. 履歴
+
+### Rev.4.8 (2026-05、M6.C-2 完了 + Stage 1 主目標達成 + M6.C-3 計画)
+
+- **M6.C-2 (kernel fusion + parameter map P infrastructure) 全体完了**。
+  C-2-2 / C-2-4 戦略確定 / C-2-4-a〜d / C-2-1-a / C-2-5 / C-2-6 の 9
+  commits。SHA 一覧と内容は BENCH.md §16 sub-step inventory 参照。
+- **Stage 1 中間評価: 主目標達成 ✅ (Ponyo877 さん 2026-05-28 判断)**:
+  - **256×256×C3×4creature = 6.84 ms/step (146 sps)** (BENCH §15 config 5)
+  - 撤退ライン (30 FPS = 33.3ms) を **4.87×**、主目標 60 FPS (16.7ms) を
+    **2.44×** 上回る
+  - 当初 M6.B Amdahl extrapolation (13-22 sps) を **6-11× 上回る**圧倒的
+    好結果
+  - **主目標 (256×256×4creature×60FPS) 達成済みと確定**
+- **主要 measured 観察** (BENCH §15 / §16):
+  - **N=256 FFT-vs-Direct = 34×** が §14 extrapolation (3-5×) を約
+    6.8-11× 超過。Direct の per-cell O(kernel_area × K × C) が N=256 で
+    catastrophic (232 ms)、FFT は O(N² log N) で緩やか → ratio は N 増で
+    **増加** (§14 の減少仮定は誤り、§16 で訂正)
+  - **C-2 perf micro-opt (C-2-1-a fused inverse + C-2-2 SM unroll) の
+    end-to-end 効果 ≈ ゼロ** (1.04× / 0.99×、thermal noise band 内)。
+    原因: 削減した dispatch の大半が安価な copy、FFT path は
+    compute-bound で dispatch 削減の限界効用低い (CLAUDE.md 原則 1 に
+    従い原因究明、対症療法せず)
+  - **localized 4-creature overhead = 1.063× (6.3%)** のみ。case δ
+    paper-faithful parameter map P infra は実用上 negligible overhead
+- **case δ infrastructure 完成** (C-2-4-a〜d): Plantec 2025 §3.1
+  parameter map P (per-cell K-vector) + AffinityGrowthPass localized
+  (Eq. 7) + ParameterFlowPass (Eq. 8 M5 hook、identity-copy)。Eq. 8
+  stochastic sampling は `docs/M6_C2_4_creature_design.md` §"M5 hook
+  specification" に明文化
+- **戦略決定: 512 高性能エンジン (M6.C-3) を取りに行く** (Ponyo877 さん
+  2026-05-28、「理論値の超高性能エンジンを完成させてから M5 進化的探索
+  へ」):
+  - 256 で over-engineering だった subgroup / mixed-precision を 512 で
+    「60 FPS 達成に必要」に転用
+  - 512 = 2^9 は radix-4 非対応 → **mixed-radix FFT (radix-4 × 4 +
+    radix-2 × 1)** が技術的核心 (M6.C-3-1)
+  - 512 naive 外挿 ~32 sps、60 FPS まで追加 1.85× → deferred 手法積
+    (subgroup × mixed-precision × workgroup tuning = 2.34-4.5×) で射程内
+- **§8 M6 セクション更新**: M6.A/B/C-1/C-2 = ✅、**256 主目標達成**、
+  M6.C-3 (512 高性能 FFT エンジン、7 sub-step) を正式計画。旧 M6.C-3
+  (mixed-precision) / M6.C-4 (4 creature) は M6.C-2 (4creature 完了) +
+  新 M6.C-3 (512 + subgroup + mixed-precision) に再編
+- **subgroup ops は Chrome 限定 (案 P)**: M6.C-3-3 subgroup reduction
+  は Chrome のみ、Safari/Firefox は subgroup なし fallback path (M5 で
+  完成、M6.C-3 では Chrome path 優先)。SNS 公開時「512 ハイエンドは
+  Chrome 推奨」運用
+- **60 FPS 未達時の方針 (案 a)**: M6.C-3-6 で 512 が 60 FPS 未達でも
+  「届いた最高 FPS で確定」(例 45 FPS でも 512 ハイエンドとして価値)、
+  最後の極限最適化に固執せず M5 へ進む
 
 ### Rev.4.7 (2026-05、M6.C-1 WGSL FFT 実装完了)
 
@@ -1039,20 +1089,65 @@ Cloudflare Pages にデプロイ。
 
 ### M6: 性能チューニング (Rev.4.2 で M5 の前に前倒し)
 
-**進捗** (Rev.4.6 更新):
-- ✅ M6.A 検証基盤 (validation infrastructure): A.0-A.9 完了、
-  origin/main 7b71816。詳細は BENCH.md §5-§13 / Rev.4.6 ヘッダー
-- 🔜 M6.B 文献調査: WGSL FFT 実装方式 (具体的アルゴリズム / GPU
-  primitives 利用 / 参照実装は M6.B で決定)。1 週間想定。
-  実装ターゲットの algorithm 名は本書 §8 M6 optional stretch (Rev.4
-  既述) で "Stockham カーネル × 2 軸、複素 f32" と仮置きされており、
-  M6.B 文献調査の結果次第で変更される可能性あり
-- 🔜 M6.C per-pass optimization: convolve FFT 化が最重要 (BENCH §2
-  per-pass 97.4 % 占有)。bind-group caching は M6.0 §3 audit で既に
-  optimal 確認済のため scope 外
-- 🔜 M6.D Stage 1 中間評価: 256×256 / 4 creature / 60 FPS の見通し
-  を判定、撤退ライン (256×256×3×4 で 30 FPS なら成果) を確認
+**進捗** (Rev.4.8 更新):
+- ✅ M6.A 検証基盤 (validation infrastructure): A.0-A.9 完了。
+  詳細は BENCH.md §5-§13 / Rev.4.6 ヘッダー
+- ✅ M6.B 文献調査: WGSL FFT 実装方式確定 (Cooley-Tukey radix-4、
+  workgroup-memory tiled)。BENCH §13 / Rev.4.7
+- ✅ M6.C-1 WGSL FFT 実装: 9 commits、N=64 で 8.2-8.7× speedup。
+  BENCH §14 / Rev.4.7
+- ✅ **M6.C-2 kernel fusion + parameter map P infrastructure**: 9
+  commits、case δ paper-faithful 4 creature infra 完成。BENCH §15-§16
+  / Rev.4.8
+- ✅ **M6.D Stage 1 中間評価: 主目標達成** (2026-05-28)。
+  256×256×C3×4creature = **146 sps** (撤退ライン 4.87× / 60 FPS 2.44×
+  クリア)。**主目標 (256×256×4creature×60FPS) 達成確定**
+- 🔜 **M6.C-3 512 高性能 FFT エンジン**: 最終ゴール (512×512×4creature×
+  60FPS) 用。mixed-radix FFT + subgroup + mixed-precision。7 sub-step
+  (下記)。Stage 2 中間評価は C-3-2 完了時
 - 🔜 M6.E 最終評価 + ドキュメント
+
+#### M6.C-3: 512 高性能 FFT エンジン (Rev.4.8 で正式計画)
+
+512 = 2^9 は radix-4 非対応 (4^4=256, 4^5=1024)。256 主目標達成済の
+余力を最終ゴール 512×512×4creature×60FPS に投入。256 で
+over-engineering だった subgroup / mixed-precision が 512 では 60 FPS
+達成に必要に転じる。
+
+| sub-step | 内容 |
+|---|---|
+| C-3-1 | **mixed-radix FFT** (radix-4 × 4 + radix-2 × 1) for N=512。技術的核心 |
+| C-3-2 | 512 で FFT path 有効化 + 動作確認 (naive ~32 sps 目標)。**Stage 2 中間評価** |
+| C-3-3 | subgroup reduction (Chrome 限定、SIMD lane=32)。Safari/Firefox は fallback path |
+| C-3-4 | mixed-precision (kernel/twiddle f16、field f32) |
+| C-3-5 | workgroup tuning (512 tile 最適化) |
+| C-3-6 | 512×512×4creature 60 FPS 達成確認 + Stage 2 final。**届いた最高 FPS で確定** (案 a) |
+| C-3-7 | retro + BENCH + DESIGN Rev.4.9 |
+
+**C-3-1 mixed-radix FFT 検証**:
+- rustfft (既存 dev-dep) と rel < 1e-4 一致 (N=512)
+- round-trip (forward → inverse) で原 field 復元
+- 既存 N=64/256 path は無変更 (regression なし)
+- 5-layer test に N=512 追加 (CPU bit-equal / mass / GPU-CPU / snapshot /
+  creature alive)。512 chaos tolerance は A.4.5 grid 依存から外挿
+  (256 で 2.5e-3 → 512 で ~5e-3、実測で確定)
+
+**Stage 2 中間評価 (C-3-2 完了時、Ponyo877 さん介在ポイント)**:
+naive 512 FPS で判定:
+- ≥ 40 sps → subgroup + mixed-precision で 60 FPS 確実
+- 30-40 sps → 全 deferred 手法必要、続行
+- 20-30 sps → 1.85× 境界、慎重続行
+- < 20 sps → mixed-radix FFT 実装に問題、Phase 3 条件 3 で Claude Web 相談
+
+**subgroup ops Chrome 限定 (案 P)**: C-3-3 は Chrome のみ有効、
+Safari/Firefox は subgroup なし低速 fallback。runtime feature detection
+で切替。SNS 公開時「512 ハイエンドは Chrome 推奨」運用。
+
+**60 FPS 未達時 (案 a)**: 届いた最高 FPS で確定 (45 FPS でも 512
+ハイエンドとして価値)、極限最適化に固執せず M5 へ。
+
+**動的切替**: M4.5 grid dropdown を 512 対応に拡張 (256 主目標 ↔ 512
+ハイエンド)、512 で重い場合「Chrome 推奨」表示。
 
 **成果物**:
 - 256×256 / C=3 / |K|=45 で 60 FPS 達成 (Apple M1 想定)

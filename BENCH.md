@@ -1077,6 +1077,14 @@ M6.C-2 (kernel fusion + parameter map P infra) 完了直前の measurement。
 各 trial の variance は ±5-10% (例: config 1 ratio = 9.17 / 8.51 /
 8.42×)、median で吸収。
 
+**config 5 の 1.063× overhead の読み方** (paired-ratio vs 絶対値):
+1.063× は paired interleave の per-trial `localized/constant` ratio の
+median (bench_c2_configs.rs)。一方 summary 表の config 4 (6.861) と
+config 5 (6.840) は **独立 median** で config 5 が僅かに速く見えるが、
+両者は thermal noise band 内 (差 0.3%)。6.3% overhead は interleaved
+pairing から得た値で、独立 median の表差分とは別物 (同一 trial 内で
+localized が constant より遅い分を捉えている)。
+
 ### 主要観察
 
 1. **Stage 1 撤退ライン圧倒的クリア** (config 5 = 核心):
@@ -1086,7 +1094,7 @@ M6.C-2 (kernel fusion + parameter map P infra) 完了直前の measurement。
    - §14 の Amdahl extrapolation "N=256/C=3/fft 46-77 ms/step (13-22
      sps)、撤退ライン marginal" は **大幅に悲観的**だった (後述 2)
 
-2. **N=256 FFT-vs-Direct ratio = 34× が §14 予測 (3-5×) を 7-10× 超過**:
+2. **N=256 FFT-vs-Direct ratio = 34× が §14 予測 (3-5×) を約 6.8-11× 超過**:
    - §14 は「N 増で convolve compute が dominant → FFT-vs-Direct ratio
      が下がる」と仮定 (line 974-978)、actual は **逆**
    - Direct は per-cell O(kernel_area × K × C)、N=256 で kernel ~33² ≈
@@ -1158,6 +1166,129 @@ M6.C-2 (kernel fusion + parameter map P infra) 完了直前の measurement。
 - Stage 1 判断 (M5 進行 / C-2 残継続 / mixed-radix 優先 / 目標再評価) は
   Ponyo877 さん責任、本 measurement を Phase 3 改訂条件 2 (早期撤退ゲート:
   C-2 ratio < 1.5×) で Claude Web 送信
+
+## Section 16 — M6.C-2 retrospective + Stage 1 中間評価結果 (主目標達成)
+
+M6.C-2 (kernel fusion + parameter map P infrastructure) milestone
+close-out。**Stage 1 中間評価: 主目標達成**を Ponyo877 さんが 2026-05-28
+判断、512 高性能エンジン (M6.C-3) へ continue 決定。
+
+### Sub-step inventory (commit SHA)
+
+| sub-step | commit | 内容 |
+|---|---|---|
+| C-2-2 | `3777394` | spectral multiply 2-cell loop unroll |
+| C-2-4 戦略確定 | `fbc7ed2` | case δ paper-faithful 確定 + CLAUDE.md subagent verification retro |
+| C-2-4-a | `afa7259` | parameter map P storage + build_for_patches + 4 unit tests |
+| C-2-1-a | `2a6d026` | kernel fusion case c (fused inverse FFT + transpose-to-pre_g) |
+| C-2-4-b | `566654c` | parameter_map → affinity_localized bridge test (4 creature) |
+| C-2-4-c | `ff52f1c` | ParameterFlowPass identity-copy + M5 Eq. 8 hook |
+| C-2-4-d | `5d9cc30` | AffinityMode::Localized 配線 + ParameterFlowPass step + 4 creature smoke |
+| C-2-5 | `1e7009a` | bench_c2_configs 5-config paired-run + BENCH §15 |
+| C-2-6 | *this commit* | retro + §16 + DESIGN Rev.4.8 + §14 extrapolation 修正 |
+
+### Stage 1 中間評価結果: 主目標達成 ✅ (Ponyo877 さん 2026-05-28 判断)
+
+CLAUDE.md 撤退ライン "256×256×3×4creature で 30 FPS なら M5 へ" に対し:
+- 実測 **6.84 ms/step (146 sps)** = 撤退ライン (33.3ms) を **4.87×**、
+  60 FPS 目標 (16.7ms) を **2.44×** 上回る (BENCH §15 config 5)
+- 当初 M6.B Amdahl extrapolation (13-22 sps、§14) を **6-11× 上回る**
+
+**主目標 (256×256×4creature×60FPS) 達成済み**と確定。
+
+**主目標達成宣言の correctness caveat** (honest framing): 本宣言は
+**性能 (FPS)** の達成であり、N=256 FFT path の **long-horizon 数値
+同値性は未検証**。§14 obs 2 の long-horizon chaos divergence は N=64
+のみ測定 (horizon 10 で既に A.4.5 tolerance violation 開始)。N=256
+FFT path の数値正確性は **short-horizon** のみ検証済 (C-1-5-a で C=3
+5-step direct vs fft max_rel 2.094e-4、§14 obs 4)。Lenia の inherent
+chaos のため long-horizon の bit 一致は physically impossible (§14
+obs 3、Layer 4 redefinition) であり、これは FFT path 固有の bug では
+ないが、「主目標達成」は perf 達成であって long-horizon correctness
+guarantee ではないことを明記する。N=256 long-horizon の chaos
+amplification 実測は M6.C-3 で 512 5-layer test 拡張時に併せて anchor
+予定。
+
+### 主要 retrospective 観察
+
+1. **C-2 perf micro-opt (C-2-1-a + C-2-2) の end-to-end 効果 ≈ ゼロ
+   — 原因究明済**:
+   - measured: N=64 C-2 speedup 1.037× (C=1) / 0.991× (C=3)、±10%
+     thermal noise band 内 (BENCH §15 §3)
+   - 原因: C-2-1-a が削減した 11 dispatch/step の大半は安価な
+     `copy_buffer_to_buffer` (10 copies)、Metal 上で数 μs。FFT path は
+     元々 **dispatch-bound でなく compute-bound** (forward/inverse FFT
+     自体が支配的) のため dispatch 削減の限界効用が低い
+   - これは CLAUDE.md 開発原則 1 (観察した現象は対症療法せず原因究明)
+     に従った結論: 「micro-opt が効かない」を tolerance 緩和等で
+     糊塗せず、compute-bound という構造的理由を特定
+   - M6.B literature survey §7.1 の「C-2 で 1.5-2×」予測は **subgroup
+     reduction (C-2-3、未実装)** 込みの想定で、実装した micro-opt 2 つ
+     だけで届かないのは整合的
+
+2. **N=256 FFT-vs-Direct = 34× が §14 extrapolation (3-5×) を約 6.8-11×
+   超過 (想定外の正の発見)**:
+   - §14 (line 974-978) は「N 増で convolve compute が dominant →
+     FFT-vs-Direct ratio が下がる」と仮定、actual は **逆**
+   - 計算量理論: Direct は per-cell O(kernel_area × K × C)、N=256 で
+     kernel ~33² ≈ 1089 cell の inner loop が catastrophic (232 ms)。
+     FFT は O(N² log N × K)、log N scaling で N 増の劣化が緩やか
+     (6.86 ms)
+   - **§14 extrapolation の誤り訂正** (下記「§14 訂正」):
+     ratio は N=64 の 8.5× → N=256 の 34× へ **増加**する (§14 の
+     減少仮定は誤り)。これは Direct の kernel-area scaling を §14 が
+     過小評価したため
+   - 教訓: extrapolation は実測で覆りうる。§14 が honest framing で
+     「extrapolation (理論、未測定)」と明記していたのは正しい姿勢
+
+3. **case δ paper-faithful infrastructure 完成 (C-2-4-a〜d)**:
+   - Plantec 2025 §3.1 parameter map P (per-cell K-vector) を CPU build
+     + GPU storage + AffinityGrowthPass localized (Eq. 7) + ParameterFlowPass
+     (Eq. 8 M5 hook) で実装
+   - localized 4-creature overhead = **1.063× (6.3%)** のみ (BENCH §15
+     §4)。2.5 MB parameter map (N=256 K=10) read + identity-copy dispatch
+     が実用上 negligible
+   - Eq. 8 stochastic sampling は M5 hook として docs に specification
+     明文化 (`docs/M6_C2_4_creature_design.md` §"M5 hook specification")
+
+4. **honest framing 検証** (Ponyo877 さん明示要求):
+   - 146 sps は誇張ではない: quiesced state (trunk serve / cargo /
+     browser 停止確認済)、paired interleave D F、N=3 median、warmup 20、
+     50 measured steps (N=256) の CLAUDE.md §測定プロトコル準拠測定
+   - 各 trial variance ±5-10% を median で吸収、min/max range も §15 表に
+     未記載だが bench stdout に出力 (再現は `bench_c2_configs`)
+   - "4.87× クリア" は config 5 median 6.84 ms ÷ 撤退ライン 33.3ms の
+     観測値であり long-term guarantee ではない (single quiesced session)
+
+### §14 extrapolation の訂正
+
+§14 line 969-978 の N=256 extrapolation は本 §15 実測で覆った:
+
+| 項目 | §14 予測 (extrapolation) | §15 実測 |
+|---|---|---|
+| N=256/C=3/fft ms/step | 46-77 ms (13-22 sps) | **6.86 ms (146 sps)** |
+| N=256 FFT-vs-Direct ratio | 3-5× (N 増で減少と仮定) | **33.9× (N 増で増加)** |
+
+§14 の誤りは「N 増で FFT compute share 増 → ratio 減」という仮定。
+実際は Direct の O(kernel_area × K × C) per-cell cost が N 増で
+catastrophic に効くため、FFT (O(N² log N)) との ratio は **N 増で増加**。
+§14 は「extrapolation (理論、未測定)」と honest framing していたため、
+実測による訂正は想定内の運用 (CLAUDE.md 測定プロトコル §4)。
+
+### M6.C-3 (512 高性能エンジン) への引き継ぎ
+
+Ponyo877 さん戦略決定 (2026-05-28):「理論値の超高性能エンジンを完成
+させてから M5 進化的探索へ」。256 で over-engineering だった
+subgroup / mixed-precision を 512 で「60 FPS 達成に必要」に転用:
+
+- C-2-3 (subgroup reduction) → M6.C-3-3 へ転用
+- C-3 (mixed-precision) → M6.C-3-4 へ転用
+- 512 = 2^9 は radix-4 非対応 → M6.C-3-1 で **mixed-radix FFT
+  (radix-4 × 4 + radix-2 × 1)** 実装が技術的核心
+- 512 naive 外挿: N=256 6.84 ms → O(N² log N) で 4.5× = ~30.8 ms
+  (32 sps)、60 FPS まで追加 1.85× 必要。deferred 手法積 (subgroup
+  1.5-2× × mixed-precision 1.3-1.5× × workgroup tuning 1.2-1.5× =
+  2.34-4.5×) で射程内
 
 ## Re-running
 
