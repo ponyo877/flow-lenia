@@ -34,7 +34,9 @@ use crate::{
         flow::FlowPass,
         gradient::GradientPass,
         kernel_fft::{precompute_kernel_ffts, KernelFftBuffers},
+        parameter_flow::ParameterFlowPass,
         reintegrate::ReintegratePass,
+        spectral_multiply::SpectralMultiplyPass,
     },
     GpuContext,
 };
@@ -100,6 +102,60 @@ impl ConvolveMode {
     }
 }
 
+/// Which affinity-growth variant the per-step pipeline uses (paper
+/// Eq. 3 vs Eq. 7).
+///
+/// **M6.C-2-4-d**: `Localized` is the production wiring of the
+/// existing M2.4 `pipeline_localized` (Eq. 7 per-cell `P_i(x)`)
+/// plus the C-2-4-c `ParameterFlowPass` (identity-copy + M5 Eq. 8
+/// hook). Multi-creature simulation goes through this path; default
+/// remains `Constant` so existing single-creature tests / UI stay
+/// on the Eq. 3 path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
+pub enum AffinityMode {
+    /// Paper Eq. 3: one constant `h_i` per kernel. M2.4 default;
+    /// used by every `gpu_pipeline_*` legacy test and by the
+    /// flow-lenia-app single-creature UI.
+    #[default]
+    Constant,
+    /// Paper Eq. 7: per-cell `P_i(x)` map (4 creature M6.C-2-4
+    /// scope). Pipeline holds two ping-pong P buffers and runs
+    /// `ParameterFlowPass` after `ReintegratePass` each step so
+    /// `P` follows the same ping-pong cadence as `A` (identity
+    /// copy until M5 wires Eq. 8 stochastic sampling into the WGSL
+    /// hook block — see `docs/M6_C2_4_creature_design.md` §"M5
+    /// hook specification").
+    Localized,
+}
+
+/// Localized-mode state bundle. Present iff
+/// `affinity_mode == AffinityMode::Localized`.
+struct LocalizedState {
+    parameter_flow_pass: ParameterFlowPass,
+    /// Ping-pong P map buffers (same indexing convention as
+    /// `a_buffers`: `p_buffers[ping]` is the *source* each step,
+    /// `p_buffers[1 - ping]` is the destination).
+    p_buffers: [wgpu::Buffer; 2],
+    /// Per-ping affinity bind groups — binding 2 (`p_map`) points
+    /// at the matching ping's P buffer. Replaces the
+    /// `Constant`-mode single `affinity_bg`.
+    affinity_localized_bgs: [wgpu::BindGroup; 2],
+    /// Per-ping parameter-flow bind groups — `p_in` =
+    /// `p_buffers[ping]`, `p_out` = `p_buffers[1 - ping]`,
+    /// `matter_flow` = `flow_field_buf`, `kernel_routing` =
+    /// `kernel_routing_buf`, `globals` = `globals_buf`.
+    parameter_flow_bgs: [wgpu::BindGroup; 2],
+    /// `array<u32>` length K, `kernel_routing[k] = c0` (source
+    /// channel of kernel k). Held live so the bind group's internal
+    /// buffer reference stays valid; never read directly by Rust
+    /// (used only via the bind group's binding 3 in
+    /// `parameter_flow.wgsl`). Currently unused inside the WGSL
+    /// identity copy; reserved for M5 Eq. 8 creature-competition
+    /// semantics (see `parameter_flow.wgsl` header).
+    #[allow(dead_code)]
+    kernel_routing_buf: wgpu::Buffer,
+}
+
 /// One full Flow-Lenia step on the GPU. Owns every buffer and bind
 /// group it needs for steady-state per-step recording.
 ///
@@ -155,6 +211,11 @@ pub struct GpuStepPipeline {
     channels: u32,
     step_count: u64,
     convolve_mode: ConvolveMode,
+
+    // M6.C-2-4-d: Localized (Eq. 7 + ParameterFlowPass) state.
+    // `Some` iff `affinity_mode == AffinityMode::Localized`.
+    affinity_mode: AffinityMode,
+    localized: Option<LocalizedState>,
 }
 
 impl GpuStepPipeline {
@@ -177,7 +238,15 @@ impl GpuStepPipeline {
         kernel_params: &KernelParams,
         initial_a: &ActivationField,
     ) -> Self {
-        Self::new_with_mode(ctx, cfg, kernel_params, initial_a, ConvolveMode::Auto)
+        Self::new_with_modes(
+            ctx,
+            cfg,
+            kernel_params,
+            initial_a,
+            ConvolveMode::Auto,
+            AffinityMode::Constant,
+            None,
+        )
     }
 
     /// M6.C-1-4-b explicit-mode constructor. For `ConvolveMode::Fft`
@@ -195,6 +264,42 @@ impl GpuStepPipeline {
         kernel_params: &KernelParams,
         initial_a: &ActivationField,
         convolve_mode: ConvolveMode,
+    ) -> Self {
+        Self::new_with_modes(
+            ctx,
+            cfg,
+            kernel_params,
+            initial_a,
+            convolve_mode,
+            AffinityMode::Constant,
+            None,
+        )
+    }
+
+    /// M6.C-2-4-d full-mode constructor. Takes both
+    /// [`ConvolveMode`] and [`AffinityMode`]. For
+    /// `AffinityMode::Localized` the caller must supply
+    /// `initial_p_map` (`H * W * K` row-major `(y, x, ki)` flat,
+    /// matching [`parameter_map::build_for_patches`] output);
+    /// `None` is asserted away. For `AffinityMode::Constant` the
+    /// `initial_p_map` argument is ignored.
+    ///
+    /// Localized state allocated here:
+    /// - `[wgpu::Buffer; 2]` ping-pong P maps
+    /// - `ParameterFlowPass` + per-ping bind groups
+    /// - `kernel_routing` buffer (length-K `u32`, `c0` per kernel)
+    /// - Per-ping `affinity_growth.pipeline_localized` bind groups
+    ///   (binding 2 = current ping's P buffer)
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_modes(
+        ctx: &GpuContext,
+        cfg: &FlowLeniaConfig,
+        kernel_params: &KernelParams,
+        initial_a: &ActivationField,
+        convolve_mode: ConvolveMode,
+        affinity_mode: AffinityMode,
+        initial_p_map: Option<&[f32]>,
     ) -> Self {
         // M6.C-1-5-b auto-fallback: `Auto` resolves to `Fft` for
         // supported grids, `Direct` otherwise. The stored field will
@@ -365,6 +470,117 @@ impl GpuStepPipeline {
         );
         let gradient_u_bg = gradient_pass.make_bind_group_u(ctx, &u_buf, &grad_u_buf, &globals_buf);
 
+        // M6.C-2-4-d: Localized mode state. Only allocated when
+        // `affinity_mode == Localized`; the Constant default leaves
+        // every Localized buffer unallocated so existing tests pay
+        // zero memory + zero pipeline-construction cost.
+        let localized = match affinity_mode {
+            AffinityMode::Constant => {
+                assert!(
+                    initial_p_map.is_none(),
+                    "AffinityMode::Constant must not be paired with initial_p_map; \
+                     pass None"
+                );
+                None
+            }
+            AffinityMode::Localized => {
+                let p_initial = initial_p_map.expect(
+                    "AffinityMode::Localized requires initial_p_map (H * W * K row-major \
+                     flat, matching parameter_map::build_for_patches output)",
+                );
+                let p_len_expected =
+                    (height as usize) * (width as usize) * (kernel_buffers.count as usize);
+                assert_eq!(
+                    p_initial.len(),
+                    p_len_expected,
+                    "initial_p_map length {} does not match H*W*K = {p_len_expected}",
+                    p_initial.len()
+                );
+
+                // Two ping-pong P buffers. Both allocated via
+                // `ParameterFlowPass::allocate_p` so they each carry
+                // STORAGE | COPY_SRC | COPY_DST and either can be
+                // read back by tests at any ping orientation (the
+                // identity-copy semantics here mean `p_buffers[0]`
+                // and `p_buffers[1]` should hold the same map once
+                // any step has run, but allocation symmetry is the
+                // contract; see also `upload_parameter_map_buf`
+                // standalone helper which is COPY_DST-only and
+                // suitable for downstream callers that own their own
+                // readback path).
+                let p_buffer_0 =
+                    ParameterFlowPass::allocate_p(ctx, height, width, kernel_buffers.count);
+                let p_buffer_1 =
+                    ParameterFlowPass::allocate_p(ctx, height, width, kernel_buffers.count);
+                ctx.queue.write_buffer(&p_buffer_0, 0, cast_slice(p_initial));
+                let p_buffers = [p_buffer_0, p_buffer_1];
+
+                // kernel_routing buffer (length K, u32, source channel
+                // per kernel). Reused for the parameter_flow binding
+                // 3 hook (M5 creature competition).
+                let routing: Vec<u32> = kernel_params
+                    .kernels
+                    .iter()
+                    .map(|e| e.c0 as u32)
+                    .collect();
+                let kernel_routing_buf =
+                    SpectralMultiplyPass::upload_kernel_routing(ctx, &routing);
+
+                let parameter_flow_pass = ParameterFlowPass::new(ctx);
+
+                // Per-ping affinity bind groups: binding 2 = current
+                // ping's P buffer.
+                let affinity_localized_bgs = [
+                    affinity_pass.make_bind_group(
+                        ctx,
+                        &pre_g_buf,
+                        &kernel_buffers,
+                        &p_buffers[0],
+                        &u_buf,
+                        &globals_buf,
+                    ),
+                    affinity_pass.make_bind_group(
+                        ctx,
+                        &pre_g_buf,
+                        &kernel_buffers,
+                        &p_buffers[1],
+                        &u_buf,
+                        &globals_buf,
+                    ),
+                ];
+
+                // Per-ping parameter-flow bind groups: p_in / p_out
+                // ping-pong, matter_flow = flow_field_buf, routing
+                // buffer + globals shared.
+                let parameter_flow_bgs = [
+                    parameter_flow_pass.make_bind_group(
+                        ctx,
+                        &p_buffers[0],
+                        &p_buffers[1],
+                        &flow_field_buf,
+                        &kernel_routing_buf,
+                        &globals_buf,
+                    ),
+                    parameter_flow_pass.make_bind_group(
+                        ctx,
+                        &p_buffers[1],
+                        &p_buffers[0],
+                        &flow_field_buf,
+                        &kernel_routing_buf,
+                        &globals_buf,
+                    ),
+                ];
+
+                Some(LocalizedState {
+                    parameter_flow_pass,
+                    p_buffers,
+                    affinity_localized_bgs,
+                    parameter_flow_bgs,
+                    kernel_routing_buf,
+                })
+            }
+        };
+
         // M6.C-1-4-b: build the FFT-mode passes + kernel pre-FFT
         // buffer iff caller selected FFT mode. The assertions above
         // already guaranteed the cfg shape is FFT-compatible.
@@ -410,6 +626,8 @@ impl GpuStepPipeline {
             channels,
             step_count: 0,
             convolve_mode,
+            affinity_mode,
+            localized,
         }
     }
 
@@ -430,11 +648,11 @@ impl GpuStepPipeline {
         let h = self.height;
         let w = self.width;
         let p = self.ping;
-        // Order: convolve → affinity → grad_u → grad_a_sum → flow → reintegrate.
+        // Order: convolve → affinity → grad_u → grad_a_sum → flow →
+        //   reintegrate → (Localized only) parameter_flow.
         self.convolve_pass
             .record(encoder, &self.convolve_bgs[p], h, w);
-        self.affinity_pass
-            .record_constant(encoder, &self.affinity_bg, h, w);
+        self.record_affinity(encoder, p, h, w);
         self.gradient_pass
             .record_u(encoder, &self.gradient_u_bg, h, w);
         self.gradient_pass
@@ -442,6 +660,7 @@ impl GpuStepPipeline {
         self.flow_pass.record(encoder, &self.flow_bgs[p], h, w);
         self.reintegrate_pass
             .record(encoder, &self.reintegrate_bgs[p], h, w);
+        self.record_parameter_flow_if_localized(encoder, p, h, w);
     }
 
     /// M6.C-1-4-b FFT-mode per-step recording. Same downstream
@@ -471,9 +690,9 @@ impl GpuStepPipeline {
             &kfft.buffer,
             &self.pre_g_buf,
         );
-        // Downstream passes are identical to Direct mode.
-        self.affinity_pass
-            .record_constant(encoder, &self.affinity_bg, h, w);
+        // Downstream passes are identical to Direct mode (modulo the
+        // shared Localized branch).
+        self.record_affinity(encoder, p, h, w);
         self.gradient_pass
             .record_u(encoder, &self.gradient_u_bg, h, w);
         self.gradient_pass
@@ -481,12 +700,85 @@ impl GpuStepPipeline {
         self.flow_pass.record(encoder, &self.flow_bgs[p], h, w);
         self.reintegrate_pass
             .record(encoder, &self.reintegrate_bgs[p], h, w);
+        self.record_parameter_flow_if_localized(encoder, p, h, w);
+    }
+
+    /// Dispatch the per-ping affinity-growth pass (Eq. 3 or Eq. 7
+    /// depending on `affinity_mode`). Shared between Direct and FFT
+    /// convolve paths.
+    fn record_affinity(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        ping: usize,
+        h: u32,
+        w: u32,
+    ) {
+        match (&self.affinity_mode, &self.localized) {
+            (AffinityMode::Constant, _) => {
+                self.affinity_pass
+                    .record_constant(encoder, &self.affinity_bg, h, w);
+            }
+            (AffinityMode::Localized, Some(loc)) => {
+                self.affinity_pass.record_localized(
+                    encoder,
+                    &loc.affinity_localized_bgs[ping],
+                    h,
+                    w,
+                );
+            }
+            (AffinityMode::Localized, None) => {
+                unreachable!(
+                    "AffinityMode::Localized without LocalizedState — new_with_modes \
+                     should have allocated it"
+                );
+            }
+        }
+    }
+
+    /// Append one [`ParameterFlowPass`] dispatch iff Localized mode
+    /// is active. No-op in `Constant`. **Order**: must run after
+    /// `reintegrate` so the freshly-written matter-flow informs M5's
+    /// Eq. 8 hook. The identity copy here is order-independent, but
+    /// the order is fixed now so M5 can plug in without rewriting
+    /// the step pipeline.
+    fn record_parameter_flow_if_localized(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        ping: usize,
+        h: u32,
+        w: u32,
+    ) {
+        if let Some(loc) = self.localized.as_ref() {
+            loc.parameter_flow_pass.record(
+                encoder,
+                &loc.parameter_flow_bgs[ping],
+                h,
+                w,
+            );
+        }
     }
 
     /// Mode accessor.
     #[must_use]
     pub fn convolve_mode(&self) -> ConvolveMode {
         self.convolve_mode
+    }
+
+    /// Affinity-growth mode accessor (M6.C-2-4-d).
+    #[must_use]
+    pub fn affinity_mode(&self) -> AffinityMode {
+        self.affinity_mode
+    }
+
+    /// Current ping's parameter-map buffer (M6.C-2-4-d). Returns
+    /// `None` outside Localized mode. Mirrors
+    /// [`current_activation_buffer`](Self::current_activation_buffer)
+    /// for the parameter-map ping-pong cadence.
+    #[must_use]
+    pub fn current_parameter_map_buffer(&self) -> Option<&wgpu::Buffer> {
+        self.localized
+            .as_ref()
+            .map(|loc| &loc.p_buffers[self.ping])
     }
 
     /// Flip the ping-pong index. Call this **after submitting** the
@@ -920,6 +1212,263 @@ mod tests {
             &kernel_params,
             &initial_a,
             ConvolveMode::Fft,
+        );
+    }
+
+    /// M6.C-2-4-d: production-pipeline 4-creature smoke test.
+    ///
+    /// Wires the C-2-4-a parameter map + C-2-4-c ParameterFlowPass
+    /// into `GpuStepPipeline.new_with_modes(_, _, _, _, Auto,
+    /// Localized, Some(p_initial))` at N=64 C=3 K=8, runs 10 steps,
+    /// and verifies:
+    ///
+    /// 1. Construction succeeds (Auto-resolves to Fft for N=64,
+    ///    Localized allocates the LocalizedState bundle)
+    /// 2. WebGPU validation is clean over the full 10-step run
+    /// 3. Mass conservation: total `A` drift < 10% (ReintegratePass
+    ///    anchors mass; the relaxed bound absorbs Localized-mode
+    ///    flux into the background P region)
+    /// 4. **P identity invariant**: bit-equal between the initial
+    ///    `p_initial` and the current ping's P buffer after 10
+    ///    steps — this is the case-(a) C-2-4-c contract carried
+    ///    through the full per-step pipeline, validating the
+    ///    parameter_flow_bgs ping-pong wiring
+    /// 5. **4 creature alive**: per-creature mass within a 24×24
+    ///    neighborhood remains > 20% of the initial blob mass after
+    ///    10 steps (Plantec §4.3.2 layout: corners disjoint at
+    ///    N=64; the threshold is the headless equivalent of the
+    ///    "screenshot shows 4 distinct creatures" visual smoke test
+    ///    in M6.C-2-4 plan)
+    #[test]
+    fn gpu_pipeline_localized_four_creatures_alive_after_10_steps() {
+        use crate::{
+            passes::parameter_map::{build_for_patches, CreaturePatch},
+            readback::readback_buffer,
+        };
+        use ndarray::Array3;
+        use rand::{Rng, SeedableRng};
+        use rand_chacha::ChaCha8Rng;
+
+        let (ctx, guard) = headless_ctx();
+
+        let n: u32 = 64;
+        let c: u32 = 3;
+        let k: u32 = 8;
+        let cfg = FlowLeniaConfig {
+            grid_width: n,
+            grid_height: n,
+            channels: c,
+            dt: 0.2,
+            sigma: 0.65,
+            n: 2.0,
+            beta_a: 2.0,
+            dd: 5,
+            num_kernels: k,
+            paper_strict: false,
+            border: BorderMode::Torus,
+            mix_rule: MixRule::Stochastic,
+        };
+        // Reuse the seed that the existing FFT-N=64-C=3 K=10 test
+        // (`gpu_pipeline_fft_mode_matches_direct_n64_c3_short`) uses;
+        // it's known to sample KernelEntries with radii that fit
+        // inside an N=64 grid. Some seeds pick r_global large enough
+        // to overflow the grid (kernel_fft.rs:117 padded-kernel
+        // assertion).
+        let seed: u64 = 0x4F_FE_64_C3_u64;
+
+        // Borrow KernelParams from a CPU-side sim build so we get the
+        // same KernelEntry sampling distribution that the rest of the
+        // pipeline tests use.
+        let cpu_init = FlowLeniaSimulator::new(cfg, seed);
+        let kernel_params = cpu_init.kernel_params().clone();
+        let h_base: Vec<f32> = kernel_params.kernels.iter().map(|e| e.h).collect();
+        assert_eq!(h_base.len(), k as usize);
+
+        // 4-creature initial A: corner-placed 16×16 blobs with random
+        // [0.3, 0.8) mass per cell per channel. Centers at (12, 12),
+        // (12, 52), (52, 12), (52, 52) keep the four neighborhoods
+        // disjoint on torus N=64 (40-cell spacing > 16-cell blob).
+        let blob_size: i32 = 16;
+        let half = blob_size / 2;
+        let centers: [(i32, i32); 4] = [(12, 12), (12, 52), (52, 12), (52, 52)];
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let mut initial_a = Array3::<f32>::zeros((n as usize, n as usize, c as usize));
+        let mut initial_creature_mass = [0.0_f32; 4];
+        for (idx, &(cy, cx)) in centers.iter().enumerate() {
+            for dy in -half..half {
+                for dx in -half..half {
+                    let y = ((cy + dy).rem_euclid(n as i32)) as usize;
+                    let x = ((cx + dx).rem_euclid(n as i32)) as usize;
+                    for ci in 0..c as usize {
+                        let v = rng.gen_range(0.3_f32..0.8);
+                        initial_a[[y, x, ci]] = v;
+                        initial_creature_mass[idx] += v;
+                    }
+                }
+            }
+        }
+        let initial_total: f32 = initial_a.iter().sum();
+        assert!(initial_total > 0.0);
+
+        // 4-creature P map: each creature scales h_base by a per-
+        // creature factor so the P vectors are visibly distinct.
+        // Background = h_base so outside-patch cells behave like
+        // Constant mode (Eq. 3 fallback) for the "wider neighborhood
+        // alive" check — without this fallback, background G(0) ≈ -1
+        // would kill all background mass and the per-creature
+        // window check would become trivial.
+        let patches: Vec<CreaturePatch> = centers
+            .iter()
+            .enumerate()
+            .map(|(idx, &(cy, cx))| {
+                let y0 = ((cy - half).rem_euclid(n as i32)) as u32;
+                let x0 = ((cx - half).rem_euclid(n as i32)) as u32;
+                let p_vector: Vec<f32> = h_base
+                    .iter()
+                    .enumerate()
+                    .map(|(ki, &h)| h * (1.0 + 0.05 * idx as f32 + 0.01 * ki as f32))
+                    .collect();
+                CreaturePatch {
+                    bbox: (y0, x0, y0 + blob_size as u32, x0 + blob_size as u32),
+                    p_vector,
+                }
+            })
+            .collect();
+        let p_initial = build_for_patches(n, k, &h_base, &patches);
+        assert_eq!(p_initial.len(), (n * n * k) as usize);
+
+        // Pipeline construction.
+        let mut pipeline = GpuStepPipeline::new_with_modes(
+            &ctx,
+            &cfg,
+            &kernel_params,
+            &initial_a,
+            ConvolveMode::Auto,
+            AffinityMode::Localized,
+            Some(&p_initial),
+        );
+        assert_eq!(
+            pipeline.convolve_mode(),
+            ConvolveMode::Fft,
+            "Auto must resolve to Fft for N=64"
+        );
+        assert_eq!(pipeline.affinity_mode(), AffinityMode::Localized);
+
+        // Run 10 steps.
+        let n_steps: u32 = 10;
+        pipeline.run_steps(&ctx, n_steps);
+
+        // (1) Mass conservation.
+        let final_a = pipeline.readback_activation(&ctx);
+        let final_total: f32 = final_a.iter().sum();
+        let mass_drift = (final_total - initial_total).abs() / initial_total.max(1e-3);
+        assert!(
+            mass_drift < 0.1,
+            "mass drift {:.3e} > 10% after {n_steps} steps \
+             (initial={initial_total:.3e} final={final_total:.3e})",
+            mass_drift
+        );
+
+        // (2) P identity bit-equal after 10 ping-pong steps. Reads
+        // the buffer the **next** step would consume (current ping);
+        // for the case-(a) identity-copy contract that buffer must
+        // hold the initial map verbatim.
+        let p_buf = pipeline
+            .current_parameter_map_buffer()
+            .expect("Localized mode pipeline must expose P buffer");
+        let p_final = readback_buffer::<f32>(&ctx, p_buf, p_initial.len());
+        for (i, (a, b)) in p_final.iter().zip(p_initial.iter()).enumerate() {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "P identity violated at index {i}: final={a} initial={b}"
+            );
+        }
+
+        // (3) 4 creature alive: each 24×24 neighborhood retains > 20%
+        // of its initial blob mass. Neighborhoods are disjoint at
+        // N=64 (centers 12 / 52, half-width 12 → ranges 0..24 and
+        // 40..64, no overlap).
+        let neighborhood_half: i32 = 12;
+        for (idx, &(cy, cx)) in centers.iter().enumerate() {
+            let mut final_mass = 0.0_f32;
+            for dy in -neighborhood_half..=neighborhood_half {
+                for dx in -neighborhood_half..=neighborhood_half {
+                    let y = ((cy + dy).rem_euclid(n as i32)) as usize;
+                    let x = ((cx + dx).rem_euclid(n as i32)) as usize;
+                    for ci in 0..c as usize {
+                        final_mass += final_a[[y, x, ci]];
+                    }
+                }
+            }
+            assert!(
+                final_mass > initial_creature_mass[idx] * 0.2,
+                "creature {idx} at ({cy}, {cx}) died: final neighborhood \
+                 mass {final_mass:.3e} < 20% of initial {:.3e}",
+                initial_creature_mass[idx]
+            );
+            eprintln!(
+                "[C-2-4-d] creature {idx} at ({cy}, {cx}): initial \
+                 mass {:.3e}, final {final_mass:.3e} (retained {:.1})",
+                initial_creature_mass[idx],
+                100.0 * final_mass / initial_creature_mass[idx].max(1e-6)
+            );
+        }
+
+        eprintln!(
+            "[C-2-4-d] Localized N=64 C=3 K=8 4-creature {n_steps}-step : \
+             total mass drift {:.3e}, P identity preserved",
+            mass_drift
+        );
+
+        if let Some(g) = &guard {
+            g.assert_no_errors();
+        }
+    }
+
+    /// M6.C-2-4-d: assertion that AffinityMode::Constant rejects an
+    /// `initial_p_map` argument (defensive: the type's docs say
+    /// Constant ignores it, but we asserted it must be None to catch
+    /// caller bugs where a Localized-intended call accidentally
+    /// picked Constant).
+    #[test]
+    #[should_panic(expected = "AffinityMode::Constant must not be paired with initial_p_map")]
+    fn gpu_pipeline_constant_mode_rejects_initial_p_map() {
+        let (ctx, _guard) = headless_ctx();
+        let cfg = small_cfg(3, false, BorderMode::Torus);
+        let cpu_init = FlowLeniaSimulator::new(cfg, 0);
+        let initial_a = cpu_init.activation().clone();
+        let kernel_params = cpu_init.kernel_params().clone();
+        let dummy_p_map = vec![0.0_f32; 8]; // wrong shape on purpose, must panic before length check
+        let _ = GpuStepPipeline::new_with_modes(
+            &ctx,
+            &cfg,
+            &kernel_params,
+            &initial_a,
+            ConvolveMode::Direct,
+            AffinityMode::Constant,
+            Some(&dummy_p_map),
+        );
+    }
+
+    /// M6.C-2-4-d: assertion that AffinityMode::Localized rejects a
+    /// missing `initial_p_map`.
+    #[test]
+    #[should_panic(expected = "AffinityMode::Localized requires initial_p_map")]
+    fn gpu_pipeline_localized_mode_requires_initial_p_map() {
+        let (ctx, _guard) = headless_ctx();
+        let cfg = small_cfg(3, false, BorderMode::Torus);
+        let cpu_init = FlowLeniaSimulator::new(cfg, 0);
+        let initial_a = cpu_init.activation().clone();
+        let kernel_params = cpu_init.kernel_params().clone();
+        let _ = GpuStepPipeline::new_with_modes(
+            &ctx,
+            &cfg,
+            &kernel_params,
+            &initial_a,
+            ConvolveMode::Direct,
+            AffinityMode::Localized,
+            None,
         );
     }
 }
