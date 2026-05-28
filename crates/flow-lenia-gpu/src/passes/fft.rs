@@ -102,6 +102,21 @@ pub fn is_supported_n(n: u32) -> bool {
     SUPPORTED_N.contains(&n)
 }
 
+/// M6.C-3-1 mixed-radix sizes: `N = 2 × 4^k` (= {8, 32, 128, 512}).
+/// These need exactly one radix-2 stage on top of the radix-4
+/// machinery (`fft_1d_radix2x4.wgsl`). Distinct from the pure-radix-4
+/// [`SUPPORTED_N`]; the FFT-mode pipeline does **not** route these
+/// through `ConvolveFftPass` yet (that wiring is M6.C-3-2).
+pub const SUPPORTED_MIXED_N: &[u32] = &[8, 32, 128, 512];
+
+/// Check whether `n = 2 × 4^k` (i.e. `n/2` is a power of 4 and `n`
+/// is even). The mixed-radix primitive [`FftPass::new_h_mixed`]
+/// handles these.
+#[must_use]
+pub fn is_supported_mixed_n(n: u32) -> bool {
+    SUPPORTED_MIXED_N.contains(&n)
+}
+
 /// Compiled 1D radix-4 FFT pass for a single axis. C-1-1 callers
 /// instantiate this directly via [`FftPass::new_h`]; C-1-2 callers
 /// should prefer [`Fft2dPass`] which owns both H and V passes.
@@ -117,6 +132,12 @@ impl FftPass {
     /// [`Fft2dPass::new`] instead.
     #[must_use]
     pub fn new_h(ctx: &GpuContext, n: u32) -> Self {
+        assert!(
+            is_supported_n(n),
+            "C-1-2 FftPass supports N ∈ {SUPPORTED_N:?} (got {n}); \
+             mixed-radix sizes (32/128/512) require a radix-2 fall-out \
+             stage — use FftPass::new_h_mixed for N = 2 × 4^k."
+        );
         Self::compile(
             ctx,
             n,
@@ -129,12 +150,41 @@ impl FftPass {
     /// Compile the V-axis (column-stride) variant.
     #[must_use]
     pub fn new_v(ctx: &GpuContext, n: u32) -> Self {
+        assert!(
+            is_supported_n(n),
+            "C-1-2 FftPass supports N ∈ {SUPPORTED_N:?} (got {n}); \
+             mixed-radix sizes (32/128/512) require a radix-2 fall-out \
+             stage — use FftPass::new_h_mixed for N = 2 × 4^k."
+        );
         Self::compile(
             ctx,
             n,
             include_str!("../shaders/fft_1d_radix4_v.wgsl"),
             "fft_1d_radix4_v",
             "fft_1d_radix4_v.wgsl",
+        )
+    }
+
+    /// M6.C-3-1 mixed-radix H-axis variant for `N = 2 × 4^k`
+    /// ({8, 32, 128, 512}). Uses `fft_1d_radix2x4.wgsl` (4^k radix-4
+    /// stages + 1 radix-2 combine). Binding contract is identical to
+    /// the pure-radix-4 pass, so [`make_bind_group`](Self::make_bind_group)
+    /// / [`record`](Self::record) / [`upload_params`](Self::upload_params)
+    /// all apply unchanged. The V-axis mixed variant + 2D + ConvolveFftPass
+    /// wiring land in M6.C-3-2.
+    #[must_use]
+    pub fn new_h_mixed(ctx: &GpuContext, n: u32) -> Self {
+        assert!(
+            is_supported_mixed_n(n),
+            "FftPass::new_h_mixed supports N ∈ {SUPPORTED_MIXED_N:?} \
+             (= 2 × 4^k) (got {n}); pure powers of 4 use FftPass::new_h."
+        );
+        Self::compile(
+            ctx,
+            n,
+            include_str!("../shaders/fft_1d_radix2x4.wgsl"),
+            "fft_1d_radix2x4",
+            "fft_1d_radix2x4.wgsl",
         )
     }
 
@@ -145,13 +195,6 @@ impl FftPass {
         entry: &str,
         label: &str,
     ) -> Self {
-        assert!(
-            is_supported_n(n),
-            "C-1-2 FftPass supports N ∈ {SUPPORTED_N:?} (got {n}); \
-             mixed-radix sizes (32/128/512) require a radix-2 fall-out \
-             stage and are out of scope for M6.C-1-2."
-        );
-
         let shader = ctx
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -1165,5 +1208,255 @@ mod tests {
     fn fft_1d_gpu_inverse_round_trip_n64() {
         let max_abs = run_1d_gpu_round_trip(0xFF7_1D_64, 64);
         eprintln!("[M6.C-1-2] fft_1d GPU round-trip N=64  : max_abs={max_abs:.3e}");
+    }
+
+    // ─── M6.C-3-1 mixed-radix (N = 2 × 4^k) tests ──────────────────────
+
+    /// Forward mixed-radix N=512 vs rustfft, **random input** (4 rows).
+    /// Random input is essential here: it exercises every twiddle
+    /// (impulse passes regardless of twiddle bugs — see C-1-1 rustdoc).
+    /// This is the primary correctness anchor for the radix-2 combine
+    /// stage at the target size.
+    #[test]
+    fn fft_1d_mixed_matches_rustfft_n512() {
+        let (ctx, guard) = headless_ctx();
+        let pass = FftPass::new_h_mixed(&ctx, 512);
+        let twiddles = precompute_twiddles_1d(&ctx, 512);
+
+        let mut rng = ChaCha8Rng::seed_from_u64(0x512_FF7);
+        let n_rows: usize = 4;
+        let input: Vec<f32> = (0..(n_rows * 512))
+            .map(|_| rng.gen_range(-1.0_f32..1.0))
+            .collect();
+
+        let gpu = run_forward_1d(&ctx, &pass, &twiddles, &input);
+        let cpu = cpu_reference_fft_1d(512, &input);
+
+        let mut max_abs = 0.0_f32;
+        let mut max_rel = 0.0_f32;
+        for (i, (g, c)) in gpu.iter().zip(cpu.iter()).enumerate() {
+            let abs_re = (g[0] - c[0]).abs();
+            let abs_im = (g[1] - c[1]).abs();
+            let mag = (c[0] * c[0] + c[1] * c[1]).sqrt().max(1e-6);
+            let rel = abs_re.max(abs_im) / mag;
+            max_abs = max_abs.max(abs_re.max(abs_im));
+            max_rel = max_rel.max(rel);
+            assert!(
+                rel < 1e-4 || abs_re.max(abs_im) < 1e-5,
+                "bin {i}: rel={rel:.3e} abs_re={abs_re:.3e} abs_im={abs_im:.3e}"
+            );
+        }
+        eprintln!(
+            "[M6.C-3-1] fft_1d_mixed vs rustfft N=512 : max_abs={max_abs:.3e}  \
+             max_rel={max_rel:.3e}"
+        );
+
+        if let Some(g) = &guard {
+            g.assert_no_errors();
+        }
+    }
+
+    /// Forward mixed-radix **N=8** (= 2 × 4) vs rustfft, random input.
+    /// Small-case cross-check of the radix-2 combine stage (1 radix-4
+    /// stage + 1 radix-2 stage). N=8 = M=4 case: digit_reverse over a
+    /// single base-4 digit, then the even/odd radix-2 combine. Catches
+    /// reversal / combine-index bugs that N=512 might mask via averaging.
+    #[test]
+    fn fft_1d_mixed_matches_rustfft_n8() {
+        let (ctx, guard) = headless_ctx();
+        let pass = FftPass::new_h_mixed(&ctx, 8);
+        let twiddles = precompute_twiddles_1d(&ctx, 8);
+
+        let mut rng = ChaCha8Rng::seed_from_u64(0x8_FF7_42);
+        // 3 rows to exercise the row_base offset path too.
+        let n_rows: usize = 3;
+        let input: Vec<f32> = (0..(n_rows * 8))
+            .map(|_| rng.gen_range(-1.0_f32..1.0))
+            .collect();
+
+        let gpu = run_forward_1d(&ctx, &pass, &twiddles, &input);
+        let cpu = cpu_reference_fft_1d(8, &input);
+
+        let mut max_abs = 0.0_f32;
+        for (i, (g, c)) in gpu.iter().zip(cpu.iter()).enumerate() {
+            let abs_re = (g[0] - c[0]).abs();
+            let abs_im = (g[1] - c[1]).abs();
+            max_abs = max_abs.max(abs_re.max(abs_im));
+            assert!(
+                abs_re.max(abs_im) < 1e-5,
+                "bin {i}: gpu=({:e},{:e}) cpu=({:e},{:e})  abs={:.3e}",
+                g[0],
+                g[1],
+                c[0],
+                c[1],
+                abs_re.max(abs_im)
+            );
+        }
+        eprintln!("[M6.C-3-1] fft_1d_mixed vs rustfft N=8 : max_abs={max_abs:.3e}");
+
+        if let Some(g) = &guard {
+            g.assert_no_errors();
+        }
+    }
+
+    /// Impulse response N=512 → all-ones (sanity; passes regardless of
+    /// twiddle bugs per C-1-1 caveat, but catches dispatch-shape /
+    /// store-index errors).
+    #[test]
+    fn fft_1d_mixed_impulse_n512() {
+        let (ctx, guard) = headless_ctx();
+        let pass = FftPass::new_h_mixed(&ctx, 512);
+        let twiddles = precompute_twiddles_1d(&ctx, 512);
+
+        let mut input = vec![0.0_f32; 512];
+        input[0] = 1.0;
+        let gpu = run_forward_1d(&ctx, &pass, &twiddles, &input);
+        for (i, c) in gpu.iter().enumerate() {
+            let abs_re = (c[0] - 1.0).abs();
+            let abs_im = c[1].abs();
+            assert!(
+                abs_re < 1e-5 && abs_im < 1e-5,
+                "bin {i}: gpu=({:e}, {:e})",
+                c[0],
+                c[1]
+            );
+        }
+        eprintln!("[M6.C-3-1] fft_1d_mixed impulse N=512 → all-ones : pass");
+
+        if let Some(g) = &guard {
+            g.assert_no_errors();
+        }
+    }
+
+    /// GPU forward + GPU inverse round-trip for mixed-radix N. Isolates
+    /// the inverse path (Method B conjugate-load/store) at the target
+    /// size without 2D orchestration.
+    fn run_1d_gpu_round_trip_mixed(seed: u64, n: u32) -> f32 {
+        let (ctx, guard) = headless_ctx();
+        let pass = FftPass::new_h_mixed(&ctx, n);
+        let twiddles = precompute_twiddles_1d(&ctx, n);
+
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let input: Vec<f32> = (0..n as usize)
+            .map(|_| rng.gen_range(-1.0_f32..1.0))
+            .collect();
+
+        let buf_a = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("1d mixed round-trip A"),
+            size: (n as usize * 2 * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        ctx.queue
+            .write_buffer(&buf_a, 0, bytemuck::cast_slice(&input));
+
+        let buf_b = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("1d mixed round-trip B"),
+            size: (n as usize * 2 * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        let params_fwd = pass.upload_params(&ctx, FftParams::new(n, 1, FftDirection::Forward));
+        let params_inv = pass.upload_params(&ctx, FftParams::new(n, 1, FftDirection::Inverse));
+        let bg_fwd = pass.make_bind_group(&ctx, &buf_a, &twiddles, &buf_b, &params_fwd);
+        let bg_inv = pass.make_bind_group(&ctx, &buf_b, &twiddles, &buf_a, &params_inv);
+
+        let mut enc = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("1d mixed round-trip encoder"),
+            });
+        pass.record(&mut enc, &bg_fwd, 1);
+        pass.record(&mut enc, &bg_inv, 1);
+        ctx.queue.submit([enc.finish()]);
+        ctx.device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .unwrap();
+
+        let flat = readback_buffer::<f32>(&ctx, &buf_a, n as usize * 2);
+        let recovered: Vec<f32> = flat.chunks_exact(2).map(|c| c[0]).collect();
+
+        let mut max_abs = 0.0_f32;
+        for (i, (&r, &orig)) in recovered.iter().zip(input.iter()).enumerate() {
+            let abs_err = (r - orig).abs();
+            max_abs = max_abs.max(abs_err);
+            assert!(
+                abs_err < 1e-4,
+                "1D mixed GPU round-trip (N={n}) mismatch at idx {i}: \
+                 recovered={r} orig={orig} abs={abs_err:.3e}"
+            );
+        }
+        if let Some(g) = &guard {
+            g.assert_no_errors();
+        }
+        max_abs
+    }
+
+    #[test]
+    fn fft_1d_mixed_round_trip_n512() {
+        let max_abs = run_1d_gpu_round_trip_mixed(0x512_1D_67, 512);
+        eprintln!("[M6.C-3-1] fft_1d_mixed GPU round-trip N=512 : max_abs={max_abs:.3e}");
+    }
+
+    #[test]
+    fn fft_1d_mixed_round_trip_n8() {
+        let max_abs = run_1d_gpu_round_trip_mixed(0x8_1D_67, 8);
+        eprintln!("[M6.C-3-1] fft_1d_mixed GPU round-trip N=8 : max_abs={max_abs:.3e}");
+    }
+
+    /// Forward mixed-radix vs rustfft for the intermediate declared
+    /// sizes N=32 (2 radix-4 stages + radix-2) and N=128 (3 stages +
+    /// radix-2). Closes the "declared in SUPPORTED_MIXED_N but
+    /// untested" gap (adversarial-reviewer C-3-1): these exercise the
+    /// non-top-stage twiddle stride `local_idx · N/stage_size` against
+    /// the full-N table that the N=8/N=512 endpoints alone don't fully
+    /// cover. Random input (impulse would mask twiddle bugs).
+    #[test]
+    fn fft_1d_mixed_matches_rustfft_n32_n128() {
+        let (ctx, guard) = headless_ctx();
+        for (n, seed) in [(32u32, 0x32_FF7_u64), (128u32, 0x128_FF7_u64)] {
+            let pass = FftPass::new_h_mixed(&ctx, n);
+            let twiddles = precompute_twiddles_1d(&ctx, n);
+
+            let mut rng = ChaCha8Rng::seed_from_u64(seed);
+            let n_rows: usize = 3;
+            let input: Vec<f32> = (0..(n_rows * n as usize))
+                .map(|_| rng.gen_range(-1.0_f32..1.0))
+                .collect();
+
+            let gpu = run_forward_1d(&ctx, &pass, &twiddles, &input);
+            let cpu = cpu_reference_fft_1d(n as usize, &input);
+
+            let mut max_abs = 0.0_f32;
+            let mut max_rel = 0.0_f32;
+            for (i, (g, c)) in gpu.iter().zip(cpu.iter()).enumerate() {
+                let abs_re = (g[0] - c[0]).abs();
+                let abs_im = (g[1] - c[1]).abs();
+                let mag = (c[0] * c[0] + c[1] * c[1]).sqrt().max(1e-6);
+                let rel = abs_re.max(abs_im) / mag;
+                max_abs = max_abs.max(abs_re.max(abs_im));
+                max_rel = max_rel.max(rel);
+                assert!(
+                    rel < 1e-4 || abs_re.max(abs_im) < 1e-5,
+                    "N={n} bin {i}: rel={rel:.3e} abs_re={abs_re:.3e} abs_im={abs_im:.3e}"
+                );
+            }
+            eprintln!(
+                "[M6.C-3-1] fft_1d_mixed vs rustfft N={n} : max_abs={max_abs:.3e}  \
+                 max_rel={max_rel:.3e}"
+            );
+        }
+
+        if let Some(g) = &guard {
+            g.assert_no_errors();
+        }
     }
 }
