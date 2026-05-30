@@ -818,6 +818,161 @@ impl GpuStepPipeline {
         ctx.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
     }
 
+    /// M6.C-3-3 profiling: per-pass GPU timing breakdown for the
+    /// FFT-mode step. Returns `(label, mean_ns)` averaged over `iters`
+    /// timed steps (after 5 warmup steps).
+    ///
+    /// **CPU-clock based**, not GPU `TIMESTAMP_QUERY`. The timestamp
+    /// path (single + multi resolve variants both tried) hung on
+    /// wgpu 29 + Metal even at small `iters` — `device.poll(Wait)`
+    /// never returned after `write_timestamp` + multiple submits, with
+    /// the process sleeping at <1% CPU for minutes. **Root cause
+    /// remains unknown** (the suspicion is Metal counter sampling
+    /// buffer drain interacting with `TIMESTAMP_QUERY_INSIDE_ENCODERS`
+    /// + multiple un-polled submits, but this is unverified). The
+    /// CPU variant sidesteps the hang but does NOT guarantee that the
+    /// per-pass relative breakdown matches what `TIMESTAMP_QUERY`
+    /// would have reported once it works. Tracking that hang's root
+    /// cause is a deferred M6.C-3-7 retro item. Per-pass:
+    ///
+    ///   1. start = Instant::now()
+    ///   2. record only that pass into a fresh encoder
+    ///   3. submit
+    ///   4. device.poll(Wait) — synchronous drain
+    ///   5. elapsed = Instant::now() - start
+    ///
+    /// The submit + drain overhead is added to every pass uniformly
+    /// **under the assumption that the per-call `submit + poll(Wait)`
+    /// floor is independent of the encoded GPU work size**. That
+    /// assumption is unproven; the observed ~1.55 ms minimum across
+    /// `affinity / flow / gradient_a_sum` (M6.C-3-3 bench_512_breakdown
+    /// output) is consistent with it but is a 3-sample empirical
+    /// coincidence, not a measurement of the floor in isolation.
+    /// Treat absolute per-pass µs as `(real_gpu_us + submit_floor_us)`
+    /// where `submit_floor_us` is bounded above by ~1.55 ms but not
+    /// known below. **Relative ordering** (which pass dominates) is
+    /// usable for judgement A; **absolute values** are an upper bound
+    /// only and must NOT be compared with `bench_c2_configs` ms/step.
+    ///
+    /// Requires `convolve_mode == Fft`. The convolve entry is the
+    /// whole `ConvolveFftPass::record` (forward×C + spectral multiply
+    /// + inverse×K); drilling into those sub-dispatches is a separate
+    /// follow-up if convolve dominates.
+    ///
+    /// # Panics
+    /// Panics if `convolve_mode != Fft`.
+    pub fn profile_passes_fft(
+        &mut self,
+        ctx: &GpuContext,
+        iters: u32,
+    ) -> Vec<(&'static str, f64)> {
+        use std::time::Instant;
+        assert_eq!(
+            self.convolve_mode,
+            ConvolveMode::Fft,
+            "profile_passes_fft requires Fft mode"
+        );
+        let h = self.height;
+        let w = self.width;
+
+        let mut labels: Vec<&'static str> = vec![
+            "convolve",
+            "affinity",
+            "gradient_u",
+            "gradient_a_sum",
+            "flow",
+            "reintegrate",
+        ];
+        if self.localized.is_some() {
+            labels.push("parameter_flow");
+        }
+        let n_passes = labels.len();
+
+        // Warmup (shader cache + thermal ramp). Drain at the end so the
+        // first timed iter starts from a quiet queue.
+        for _ in 0..5 {
+            self.step(ctx);
+        }
+        ctx.device
+            .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
+            .expect("device.poll(Wait) after warmup failed");
+
+        let mut acc = vec![0.0_f64; n_passes];
+        for _ in 0..iters {
+            let p = self.ping;
+            // Helper: record + submit + drain, returns elapsed ns.
+            let measure = |label_idx: usize,
+                           record_fn: &mut dyn FnMut(&mut wgpu::CommandEncoder)|
+             -> f64 {
+                let mut enc = ctx
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("profile_passes_fft per-pass enc"),
+                    });
+                record_fn(&mut enc);
+                let start = Instant::now();
+                ctx.queue.submit([enc.finish()]);
+                ctx.device
+                    .poll(wgpu::PollType::Wait {
+                        submission_index: None,
+                        timeout: None,
+                    })
+                    .expect("device.poll(Wait) per-pass failed");
+                let _ = label_idx; // intentionally unused — caller indexes acc
+                start.elapsed().as_nanos() as f64
+            };
+
+            let fft = self.convolve_fft_pass.as_ref().expect("Fft mode");
+            let kfft = self.kernel_fft.as_ref().expect("Fft mode");
+            // Borrow self.convolve_fft_pass through a raw clone of the
+            // resource references — Rust's borrow checker would otherwise
+            // complain about &mut self in `self.record_affinity` while
+            // also holding refs into self. We work around by recording
+            // each pass into a closure that captures only the necessary
+            // shared resources, not &mut self for those that need it.
+
+            // Pass 0: convolve
+            acc[0] += measure(0, &mut |enc| {
+                fft.record(ctx, enc, &self.a_buffers[p], &kfft.buffer, &self.pre_g_buf);
+            });
+            // Pass 1: affinity (Constant only here — Localized adds the
+            // sibling parameter_flow pass at the end).
+            acc[1] += measure(1, &mut |enc| {
+                self.record_affinity(enc, p, h, w);
+            });
+            // Pass 2: gradient_u
+            acc[2] += measure(2, &mut |enc| {
+                self.gradient_pass.record_u(enc, &self.gradient_u_bg, h, w);
+            });
+            // Pass 3: gradient_a_sum
+            acc[3] += measure(3, &mut |enc| {
+                self.gradient_pass
+                    .record_a_sum(enc, &self.gradient_a_sum_bgs[p], h, w);
+            });
+            // Pass 4: flow
+            acc[4] += measure(4, &mut |enc| {
+                self.flow_pass.record(enc, &self.flow_bgs[p], h, w);
+            });
+            // Pass 5: reintegrate
+            acc[5] += measure(5, &mut |enc| {
+                self.reintegrate_pass
+                    .record(enc, &self.reintegrate_bgs[p], h, w);
+            });
+            // Pass 6 (Localized only): parameter_flow
+            if self.localized.is_some() {
+                acc[6] += measure(6, &mut |enc| {
+                    self.record_parameter_flow_if_localized(enc, p, h, w);
+                });
+            }
+            self.swap_buffers();
+        }
+
+        labels
+            .into_iter()
+            .zip(acc.into_iter().map(|a| a / f64::from(iters)))
+            .collect()
+    }
+
     /// Number of steps taken since construction.
     #[must_use]
     pub fn step_count(&self) -> u64 {

@@ -129,6 +129,50 @@ impl GpuContext {
     ) -> Self {
         pollster::block_on(Self::new(instance, compatible_surface))
     }
+
+    /// M6.C-3-3 profiling: headless context with `TIMESTAMP_QUERY`
+    /// enabled (if the adapter supports it) for per-pass GPU timing
+    /// breakdowns. **Profiling-only** — the production `new` path keeps
+    /// `Features::empty()` so the shipped app/web do not depend on a
+    /// timestamp-capable adapter. Panics if the adapter lacks
+    /// `TIMESTAMP_QUERY` (callers should check `adapter.features()`
+    /// first or only use this in benches on known hardware).
+    #[must_use]
+    pub fn new_blocking_with_timestamps(instance: wgpu::Instance) -> Self {
+        pollster::block_on(async {
+            let adapter = instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::HighPerformance,
+                    compatible_surface: None,
+                    force_fallback_adapter: false,
+                })
+                .await
+                .expect("no suitable wgpu adapter");
+            let needed = wgpu::Features::TIMESTAMP_QUERY
+                | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+            assert!(
+                adapter.features().contains(needed),
+                "adapter lacks TIMESTAMP_QUERY{{,_INSIDE_ENCODERS}} (profiling-only context)"
+            );
+            let (device, queue) = adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("flow-lenia-gpu::Device (timestamps)"),
+                    required_features: needed,
+                    required_limits: wgpu::Limits::default(),
+                    memory_hints: wgpu::MemoryHints::default(),
+                    experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                    trace: wgpu::Trace::Off,
+                })
+                .await
+                .expect("failed to request timestamp-capable device");
+            Self {
+                instance,
+                adapter,
+                device,
+                queue,
+            }
+        })
+    }
 }
 
 /// Returned alongside [`GpuContext`] when building a windowed renderer
