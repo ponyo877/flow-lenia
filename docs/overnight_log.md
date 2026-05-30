@@ -423,6 +423,130 @@ g64 を保護するには **f16 を N≥512 限定** にする path 分岐が必
    が Entry 2 の「reintegrate 支配的 (51.5% real)」を attack する
    本命
 
+---
+
+## Entry 5 — 2026-05-30 23:10 JST: C-3-5 reintegrate workgroup tiling → 0× 即捨て revert
+
+Entry 2 で「reintegrate 51.5% real は最大の bottleneck」と判定、
+Entry 4 で「C-3-5 (workgroup tuning) でリスケジュール」と宣言した
+通り、reintegrate に対する shared-memory cooperative tile load を
+実装。測定結果が **判断 B「<1.1× 即捨て」を更に下回る 0×** だった
+ので revert。
+
+### 実装した範囲
+
+1. `crates/flow-lenia-gpu/src/shaders/reintegrate_tiled_dd5.wgsl`
+   (新規) — dd=5、8×8 workgroup specialised version。
+   - tile 18×18×3 = 324 cells × MAX_C=3 channels
+   - shared mem: tile_a (972 f32 = 3.9 KB) + tile_f (1944 f32 =
+     7.8 KB) = 11.7 KB per workgroup (M1 32KB / WebGPU 16KB の
+     どちらにも余裕)
+   - cooperative load (each thread loads ~5 cells), 1 workgroupBarrier,
+     each thread does its 11×11 scan from shared mem
+   - 同 binding contract / 同 physics (BORDER_TORUS wrap + WALL clip 含む)
+2. `passes/reintegrate.rs` — ReintegratePass に
+   `pipeline_tiled_dd5` を追加 (同 bind_group_layout 共有)、
+   `record` に `dd: u32` 引数追加して dd=5 → tiled / dd≠5 → original
+   pipeline を分岐
+3. `pipeline.rs` — GpuStepPipeline に `dd: u32` field 追加
+   (cfg.dd から取得、構築時固定)、3 箇所の record() に self.dd を渡す
+4. `passes/reintegrate.rs` test (2 callers) — cfg.dd を渡す
+
+### measurement (新規 bench_512_reintegrate.rs、N=3 median)
+
+| state | 512 C=3 dd=5 constant ms/step | sps | ratio |
+|---|---|---|---|
+| baseline (no tile, current main HEAD) | 23.000 ms | 43.5 | 1.000× |
+| tiled (C-3-5 impl) | 23.019 ms | 43.4 | **0.999×** |
+
+**0× improvement**。tiled は baseline と統計的同一 (差 0.04% ≪ noise)。
+
+### 5-layer test 状態 (revert 前)
+
+- 59 lib tests pass (含む reintegrate_single_step_matches_cpu_dd5_and_dd7,
+  reintegrate_mass_conservation_100_steps_c3_torus,
+  gpu_pipeline_localized_four_creatures_alive_after_10_steps —
+  tiled pipeline の数値正当性が dd=5 において full physics で
+  確認済み)
+- 3 snapshot regression pass
+- 5 m1 regression pass
+
+つまり tiled は数値的に正しく動作する。speedup がないだけ。
+
+### 原因究明 (CLAUDE.md 原則 1)
+
+なぜ tiled が効かないか:
+
+1. **M1 Apple GPU の L1 cache が大きい (~256 KB / SM)**: 各 workgroup
+   の 18×18×3 = 11.7 KB 近傍データは L1 に easily fit。naive gather
+   pattern でも cache hit がほぼ 100% で、shared memory 経由と memory
+   bandwidth 的に大差がない。
+2. **shared memory load + barrier の overhead**: cooperative load
+   (各 thread 5-6 cells × 3 ch + workgroupBarrier) が、naive gather
+   が削減する重複読み込みコストとほぼ等価。
+3. **reintegrate は compute-bound に近い**: 11×11×3 = 363 cells per
+   target で overlap_area 計算 (clamp + sigma 演算 + 除算) が重く、
+   memory access は実質 bottleneck ではない可能性。
+
+これは A100/H100/RTX 3090 のような discrete GPU (cache 階層が薄く、
+memory bandwidth 律速) では tiling が効くが、Apple Silicon の unified
+memory + 大 L1 architecture では効きにくい、という architecture
+依存の知見。
+
+C-3-3 breakdown が submit overhead floor を差し引いた "real" %
+で reintegrate 51.5% としていたのは、global memory load 自体が
+~10ms かかっていたことを示唆していた。しかし実際は、その global
+load の大半は L1 cache hit で済んでいて、shared memory 経由でも
+コストは同じだった、と解釈できる。
+
+### 判断: <1.1× 即捨て + Stage 2 final へ
+
+- judgment B (<1.1× → 即捨て): 0× は明確に該当、revert
+- judgment C (60 FPS 判定): baseline 43.5 sps は 40-50 バケット
+  → 「512 は 40+ fps で確定、深追いせず C-3-6 へ」が user's
+  explicit rule
+
+C-3-3 / C-3-4 / C-3-5 すべて **<1.1×** で速度向上が得られず、
+これ以上の最適化候補 (subgroup butterfly barrier、FFT 内部 f16、
+larger workgroup for FFT) はいずれも:
+- overnight session で安全に実装できるリスク評価が低い
+- 期待される効果が breakdown ベースで ≤1.1× 程度
+
+ため、現状を Stage 2 final として確定する判断。
+
+### Stage 2 final ms/step (overnight 確定値)
+
+| config | ms/step | sps | 60 FPS budget | 達成判定 |
+|---|---|---|---|---|
+| 512 C=3 Constant FFT | 23.0 ms | 43.5 | 16.7 ms | 未達 (1.38× short) |
+| 512 C=3×4creature Localized FFT | 未測定 | — | 16.7 ms | 別測定必要 |
+
+Constant mode 43.5 sps だが、user goal の **4 creature × Localized**
+モードでは parameter_flow pass (identity copy、cheap) が追加されて
+更に少し低下する可能性。C-3-6 で測定確認。
+
+### 残置成果物 (revert に含めないもの)
+
+- `crates/flow-lenia-app/src/bin/bench_512_reintegrate.rs` (新規) —
+  C-3-5 paired bisect で使った 512 focused bench。C-3-6 / C-3-7 で
+  4 creature mode 測定 + Stage 2 final 確定にも再利用するので残す。
+
+### revert 内容
+
+- reintegrate_tiled_dd5.wgsl (新規 shader、削除)
+- ReintegratePass::pipeline_tiled_dd5 + record(dd) 引数 (revert via
+  git checkout)
+- GpuStepPipeline::dd field + record callsite の dd 引き渡し
+  (revert via git checkout)
+
+### 次のアクション
+
+1. C-3-5 revert を Entry 5 + bench_512_reintegrate と一緒に commit
+2. **C-3-6 (Stage 2 final + 60 FPS 判定)**: 4 creature Localized
+   mode で paired N=3 median ms/step を測定、judgment C を適用
+3. C-3-7 (M6.C-3 retro + BENCH §18 + DESIGN Rev.4.9)
+4. milestone 完了報告 (Phase 3 条件 1 「milestone 完了」該当)
+
 
 
 ### C-3-3 deliverable
