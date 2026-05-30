@@ -1,10 +1,62 @@
-# Flow-Lenia WebGPU Visualizer — 設計書 (Rev. 4.8)
+# Flow-Lenia WebGPU Visualizer — 設計書 (Rev. 4.9)
 
 本書は Rust + WebAssembly + WebGPU で **Flow-Lenia (Plantec et al., 2025, Artificial Life journal, arXiv:2506.08569v1)** を厳密に再現し、ブラウザ上でリアルタイム可視化する実装の設計書である。
 
 **実装の正典**は `papers/2506.08569v1.pdf` (2025年版) であり、Equation 番号は同論文を指す。副参照として `papers/2212.07906v2.pdf` (2023年版)、Moroz, 2020 "Reintegration tracking"、**公式 JAX 実装** `references/FlowLenia-jax/` (commit `dce428c`, 2024-02-08) を用いる。JAX 実装の精読結果は `references/JAX_NOTES.md` を参照。
 
 ## Rev. 履歴
+
+### Rev.4.9 (2026-05-30、M6.C-3 完了 + Stage 2 final 案 a 確定)
+
+- **M6.C-3 全体完了** (overnight self-driven、Phase 3 ワークフロー):
+  C-3-1 mixed-radix FFT / C-3-2 512 wiring / **C-3-3 per-pass
+  breakdown infrastructure + 判断** / **C-3-4 f16 試行 → 即捨て revert** /
+  **C-3-5 reintegrate workgroup tiling → 0× 即捨て revert** /
+  **C-3-6 Stage 2 final 測定** / C-3-7 retro (本 Rev)。SHA 一覧は
+  BENCH.md §18 sub-step inventory 参照。
+- **Stage 2 final 確定 (案 a 適用)**:
+  - **512×512×3ch×4creature×Localized = 24.19 ms/step (41.3 sps)**
+    (BENCH §18 最終 N=3 median)
+  - 60 FPS budget (16.67 ms) に対し **+45.2% over** = 60 FPS **未達**
+  - judgment C「40-50 sps バケット → 40+ fps で確定、深追いせず」
+    適用、**届いた最高 41.3 sps で確定し M5 へ進む**
+- **主要 measured 観察** (BENCH §18 / overnight_log.md):
+  - **C-3-3 per-pass breakdown**: TIMESTAMP_QUERY 経路が wgpu 29 +
+    Metal でハング → CPU clock variant に切替、sanity check で bit-equal
+    検証済み。real % 補正後 reintegrate 51.5% + convolve 43.6% = 95%
+    の 2 大 pass 構造を確定
+  - **C-3-4 f16 kernel_fft**: 実測 1.019× total (期待 ~1.18×)、
+    convolve の SM pass の 1ms 部分にしか効かず、FFT 内部 (8ms) には
+    影響なし → 即捨て revert
+  - **C-3-5 reintegrate workgroup tiling**: 実測 0.999× total (期待
+    1.30×)、M1 Apple Silicon の大 L1 cache が naive gather を既に
+    吸収しており shared memory 経路でも同等 → 即捨て revert
+- **Apple Silicon GPU architecture 知見** (BENCH §18 残された手段
+  + Entry 5):
+  - discrete GPU で効く memory-bound tile optimization が Apple
+    Silicon では大 L1 cache に吸収されて効かない、という transferable
+    な知見
+  - 60 FPS gap 1.45× を埋めるには **FFT 全 intermediate buffer の
+    f16 化** (channel_spectra / scratch_complex / k_spectra を u32
+    packed f16 + unpack2x16float decode) が唯一の有効 path、これは
+    M5 hook or 別 milestone で再アタック
+- **profiling infrastructure 残置** (C-3-3 deliverable):
+  - `GpuContext::new_blocking_with_timestamps` (TIMESTAMP_QUERY ctx、
+    将来 root cause 追跡用に残置)
+  - `GpuStepPipeline::profile_passes_fft` (CPU clock per-pass timing、
+    relative breakdown のみ信頼可と rustdoc 明示)
+  - `bench_512_breakdown` + `bench_512_reintegrate` (focused Stage 2
+    bench)
+  - `probe_shader_f16` (将来 FFT 全 f16 化を再検討する時に再利用)
+- **判断 B (≥1.2× 採用 / <1.1× 即捨て) の有効性**: Phase 3 早期撤退
+  ロジックで時間を溶かさず止められた (C-3-4 + C-3-5 合計 ~3h、各
+  手法 約 1h 以内で判定 + revert + commit)
+- **§8 M6 セクション更新**: M6.A/B/C-1/C-2/C-3 = ✅、**Stage 1 主目標
+  達成 (256, 146 sps)、Stage 2 案 a (512, 41.3 sps) で確定**、次は
+  M5 (進化的探索 + Eq. 8 stochastic sampling) へ
+- **未達 60 FPS の future work 候補**: BENCH §18 残された手段 1-3 に
+  記録。M5 開始時の reassess で扱うか、別 milestone (M6.D?) として
+  scope 切り直すかは Ponyo877 さん判断
 
 ### Rev.4.8 (2026-05、M6.C-2 完了 + Stage 1 主目標達成 + M6.C-3 計画)
 

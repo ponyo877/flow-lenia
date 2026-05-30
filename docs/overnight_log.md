@@ -547,6 +547,106 @@ Constant mode 43.5 sps だが、user goal の **4 creature × Localized**
 3. C-3-7 (M6.C-3 retro + BENCH §18 + DESIGN Rev.4.9)
 4. milestone 完了報告 (Phase 3 条件 1 「milestone 完了」該当)
 
+---
+
+## Entry 6 — 2026-05-30 23:30 JST: Stage 2 final 確定 (C-3-6) + retro (C-3-7) + milestone 完了
+
+bench_512_reintegrate を 4 creature Localized 測定対応に拡張し、
+Stage 2 final ms/step を確定。BENCH §18 + DESIGN Rev.4.9 で記録。
+
+### Stage 2 final 実測 (N=3 median、quiesced state)
+
+```
+=== 512 C=3 K=10 dd=5 ms/step (warmup 20, measured 50, ×3) ===
+  trial 0: constant=23.238 ms (43.0 sps)  4-creature=24.409 ms (41.0 sps)
+  trial 1: constant=23.022 ms (43.4 sps)  4-creature=24.193 ms (41.3 sps)
+  trial 2: constant=22.943 ms (43.6 sps)  4-creature=24.169 ms (41.4 sps)
+
+=== SUMMARY (median of 3) ===
+  constant       : 23.022 ms (43.4 sps)
+  4-creature loc : 24.193 ms (41.3 sps)
+  60 FPS budget  : 16.667 ms (60.0 sps)
+  4-creature gap : +7.526 ms (+45.2%)
+```
+
+### judgment C (60 FPS 判定) 適用
+
+ユーザー指示の閾値:
+- ≥ 60 sps → 達成
+- 50-60 sps → 実質達成、最高 FPS 確定
+- 40-50 sps → 512 は 40+ fps で確定、深追いせず
+
+**結果: 4-creature localized 41.3 sps → 40-50 バケット → 「40+ fps
+で確定、深追いせず」**。案 a (届いた最高 FPS で確定) 適用、M6.C-3
+を close。
+
+### overnight 結果サマリ (Ponyo877 さん朝の引き継ぎ用)
+
+| sub-step | 結果 | 効果 | 判定 |
+|---|---|---|---|
+| C-3-3-a infrastructure | breakdown bench + profile_passes_fft | (調査用) | commit + push |
+| C-3-3-b breakdown decision | reintegrate 51.5% + convolve 43.6% = 95% | (調査用) | commit + push |
+| C-3-4 f16 kernel_fft | 30.42 → 29.84 µs total | **1.019×** | <1.1× 即捨て revert |
+| C-3-5 reintegrate tiling | 23.00 → 23.02 ms total | **0.999×** | <1.1× 即捨て revert |
+| C-3-6 Stage 2 final | 4 creature 41.3 sps | (確定値) | 40-50 バケット、案 a |
+| C-3-7 retro | DESIGN Rev.4.9 + BENCH §18 | (文書) | 本 entry |
+
+### commits (overnight 中)
+
+```
+d306035 M6.C-3-3-a: per-pass breakdown infrastructure
+02f8644 M6.C-3-3-b: breakdown analysis + decision + C-3-4 期待値根拠
+341e4f6 M6.C-3-4: f16 kernel_fft 試行 → <1.1× 即捨て revert
+c861d23 M6.C-3-5: reintegrate workgroup tiling 試行 → 0× 即捨て revert
+[本 commit] M6.C-3-6 + C-3-7: Stage 2 final + retro + milestone 完了
+```
+
+### 朝の Ponyo877 さん判断のための要点 (TL;DR)
+
+- **Stage 1 主目標 (256, 60 FPS) は §16 で達成済み (146 sps、圧倒的)**
+- **Stage 2 (512, 60 FPS) は未達、届いた最高 41.3 sps で確定**
+  - 60 FPS budget 16.67 ms に対し 24.19 ms = +45.2% over
+  - 50-60 sps の「実質達成」バケットにも届かず、40-50 バケット
+- C-3-3〜C-3-5 の試行で得た知見:
+  - reintegrate + convolve = 95% を 2 大 pass で占める
+  - Apple Silicon の大 L1 cache が memory-bound tile opt を吸収
+  - kernel_fft 単体 f16 化は SM pass の小部分のみで効果限定
+- 60 FPS gap 1.45× を埋める可能性のある残された手段は **FFT 全
+  intermediate buffer の f16 化** (大規模 shader 改修、M5 hook or
+  別 milestone で再検討)
+- **次の判断材料**: M5 (進化的探索 + Eq. 8 stochastic sampling) に
+  進むか、別 milestone (M6.D?) として 60 FPS 追求を続けるか
+
+### STOP しなかった理由
+
+ユーザー指示の STOP 条件 (Entry 1):
+- per-pass breakdown が解釈不能 → ❌ (CPU clock variant で取得済、bit-equal 検証)
+- mixed-radix FFT 数値バグ → ❌ (n512 test pass)
+- 256 既存数値が regression → ❌ (snapshot + m1_regression pass)
+- 5-layer test が原因不明 fail → ❌ (各手法 revert 後すべて pass)
+- subgroup で Chrome/native 矛盾 → ❌ (subgroup 使わず)
+- 同じ手法を 3 回リトライしても収束しない → ❌ (各手法 1 回試行で判定)
+- mixed-precision で精度が Layer 3 tolerance 超過 → ❌ (revert で原状回復)
+
+すべて STOP 条件未該当で自走完了。
+
+### 最終 working tree 状態 (commit 後)
+
+production code は HEAD (overnight 開始時) からほぼ無変更 (Bench
+infrastructure と doc のみ追加):
+- `crates/flow-lenia-gpu/src/lib.rs` (timestamp ctx 追加)
+- `crates/flow-lenia-gpu/src/pipeline.rs` (profile_passes_fft 追加)
+- `crates/flow-lenia-app/src/bin/bench_512_breakdown.rs` (新規)
+- `crates/flow-lenia-app/src/bin/bench_512_reintegrate.rs` (新規)
+- `crates/flow-lenia-app/src/bin/probe_shader_f16.rs` (新規)
+- `BENCH.md` §18 (Stage 2 final)
+- `DESIGN.md` Rev.4.9 (M6.C-3 完了)
+- `docs/overnight_log.md` (本ファイル全体)
+
+shaders / reintegrate / convolve_fft などの core path は **一切変更
+なし** (試行は全 revert)。Stage 1 256 性能 + 4 creature snapshot は
+完全保護。
+
 
 
 ### C-3-3 deliverable
