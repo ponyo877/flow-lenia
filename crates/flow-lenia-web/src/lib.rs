@@ -89,8 +89,12 @@ const CANVAS_H: u32 = 512;
 /// pixels of horizontal room (matches the `egui::SidePanel::right`
 /// call below; keep them in sync).
 const SIDE_PANEL_W: u32 = 250;
-const GRID_W: u32 = 64;
-const GRID_H: u32 = 64;
+// M6.C-3-8 follow-up (browser 512 試行): default を 64 → 512 に変更。
+// Stage 2 final (BENCH §18) で M1 native 41.3 sps を達成済み、Chrome
+// WebGPU 上は更に遅い可能性 (~25-35 sps 想定)。32〜256 へは UI Grid
+// combo から戻せる。
+const GRID_W: u32 = 512;
+const GRID_H: u32 = 512;
 const SEED: u64 = 1729;
 
 fn demo_cfg() -> FlowLeniaConfig {
@@ -1287,7 +1291,10 @@ fn render_frame(state: &mut AppState) {
                         egui::ComboBox::from_id_salt("grid_combo")
                             .selected_text(format!("{0}×{0}", local_grid))
                             .show_ui(ui, |ui| {
-                                for &size in &[32u32, 64, 128, 256] {
+                                // M6.C-3-8 follow-up: 512 を追加 (Stage
+                                // 2 target、native 41.3 sps、Chrome
+                                // WebGPU は更に遅い見込み)。
+                                for &size in &[32u32, 64, 128, 256, 512] {
                                     ui.selectable_value(
                                         &mut local_grid,
                                         size,
