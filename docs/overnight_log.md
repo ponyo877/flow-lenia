@@ -337,6 +337,94 @@ reviewer 双方 nice-to-have):
 - commit B: `M6.C-3-3-b: breakdown analysis + decision
   (overnight_log Entry 2/3 + Stage 2 measured input for C-3-4)`
 
+---
+
+## Entry 4 — 2026-05-30 22:35 JST: C-3-4 mixed-precision 試行 → 即捨て revert
+
+Entry 3 の plan に従い C-3-4-b kernel_fft buffer の f16 化を実装。
+測定結果が判断 B 「<1.1× 即捨て」 該当だったので revert。
+
+### 実装した範囲
+
+1. `half = "2"` を flow-lenia-gpu Cargo.toml に追加 (IEEE 754
+   binary16 変換)
+2. `precompute_kernel_ffts`: f32 → f16 pair → u32 packing 経路、buffer
+   size 半減 (20MB → 10MB at K=10 N=512)
+3. `spectral_multiply.wgsl`: kernel_fft binding を `array<u32>` に変更、
+   標準 WGSL `unpack2x16float(u32) → vec2<f32>` で decode (SHADER_F16
+   feature 不要、Apple M1 / Chrome / WebGPU 全 backend で動作)
+4. `spectral_multiply_pointwise_matches_cpu` test: kernel data を
+   f16 packing + CPU 参照を f16 round-trip 経由に修正、apples-to-apples
+   比較を維持
+5. Layer 3 GPU-CPU rel tolerance を以下に raise:
+   - n64_c1_short 5e-4 → 1.5e-2 (per-cell 2^{-11} × 5-step nonlinear)
+   - n64_c3_short 5e-4 → 2.5e-2 (+ C-channel spectral mixing)
+   - n512_c1_short 5e-3 → 1.5e-2 (+ N=512 高頻度 amplification)
+   - abs_err escape 1e-5 → 1e-3 ~ 2e-3 (低 magnitude cell の rel 暴れ
+     対策、f16 absolute budget と整合)
+
+### bench_512_breakdown 再測定 (warmup 5 + 30 iter mean)
+
+| pass | f32 before | f16 after | Δ µs | Δ % |
+|---|---|---|---|---|
+| convolve | 10517 | 10008 | -510 | **-4.8%** |
+| affinity | 1586 | 1555 | -31 | -2.0% (noise) |
+| gradient_u | 3067 | 3063 | -4 | -0.1% |
+| gradient_a_sum | 1558 | 1551 | -7 | -0.5% (noise) |
+| flow | 1552 | 1548 | -4 | -0.2% |
+| reintegrate | 12140 | 12114 | -26 | -0.2% (noise) |
+| **TOTAL** | **30420** | **29839** | **-581** | **-1.9%** |
+
+512 total speedup = **1.019×** (29839 / 30420 = 0.981).
+
+### 判定: <1.1× → 即捨て (judgment B)
+
+ユーザー指示「≥1.2× 採用 / <1.1× 即捨て」のうち <1.1× に該当。
+
+原因: f16 化したのは **kernel_fft buffer のみ** (spectral_multiply 内
+で 1 binding が f16 unpack)。SM pass の負荷は convolve の 1 ms 程度
+(forward FFT ~5ms + SM ~1ms + inverse FFT ~3ms)、その 1 ms の半分
+〜全部を消しても convolve は 9 ms → 8.5 ms にしかならず total 1.02×
+が上限。
+
+本物の speedup には **FFT intermediate buffers (channel_spectra,
+scratch_complex, k_spectra) も f16 化** が必要。これは shader (5+
+WGSL files) と buffer 全 layout を変更する大規模工事、overnight
+範囲外。M5 hook + C-3-7 retro でリスケジュール候補に。
+
+### 5-layer test 状態 (revert 前)
+
+- 59 lib tests pass (tolerance 緩和済み)
+- 3 snapshot regression pass (Direct mode 経路、影響ゼロ)
+- 5 m1 regression のうち **gpu_field_regression_g64 FAIL**:
+  CPU 参照 vs GPU(Auto→Fft→f16) で rel 1.065e-1 = 10.65% (GPU
+  intrinsic chaos × f16 amplification の合算)
+  - 10-step nonlinear amp ~2^10 × per-cell f16 5e-4 ≈ 0.5 worst-case
+  - 観測 0.1 はこの上限の 1/5、物理的に妥当だが既存 baseline (1e-4)
+    から 1000× 悪化、Layer 3 tolerance を 1e-1 まで上げるのは過剰
+
+g64 を保護するには **f16 を N≥512 限定** にする path 分岐が必要だが、
+判断 B で revert 決定なので分岐実装はしない。
+
+### revert に含めるもの
+
+1. `half` dependency
+2. precompute_kernel_ffts の f16 packing 経路
+3. spectral_multiply.wgsl の u32 unpack 経路
+4. spectral_multiply_pointwise_matches_cpu test の f16 修正
+5. pipeline.rs の n64_c1 / n64_c3 / n512_c1 tolerance 緩和
+
+### 次のアクション
+
+1. 全 5-layer 修正を revert (1 commit)
+2. tests all-pass + snapshot + m1_regression 確認
+3. push
+4. **C-3-5 (workgroup tuning) 着手** — reintegrate workgroup tiling
+   が Entry 2 の「reintegrate 支配的 (51.5% real)」を attack する
+   本命
+
+
+
 ### C-3-3 deliverable
 
 1. `GpuContext::new_blocking_with_timestamps` — TIMESTAMP_QUERY
