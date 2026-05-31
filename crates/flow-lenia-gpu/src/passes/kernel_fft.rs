@@ -57,6 +57,8 @@ use bytemuck::cast_slice;
 use flow_lenia_core::kernel::compute_kernel;
 use flow_lenia_core::params::KernelParams;
 use ndarray::Array2;
+use rustfft::num_complex::Complex32;
+use rustfft::FftPlanner;
 use wgpu::util::DeviceExt;
 
 /// Owner of the K-kernel pre-FFT buffer + its dimensions. `buffer`
@@ -152,17 +154,42 @@ pub fn precompute_kernel_ffts(
     fft2d: &Fft2dPass,
     twiddles: &wgpu::Buffer,
 ) -> KernelFftBuffers {
-    assert_eq!(
-        fft2d.n, n,
-        "fft2d.n ({}) must match the precompute n ({n})",
-        fft2d.n
-    );
+    // `fft2d` and `twiddles` are kept in the signature for backwards
+    // compatibility with M6.C-1-3 callers + tests, but the CPU
+    // `rustfft` path below does not need them. Native bench code that
+    // wants the *GPU* kernel-FFT (for a JIT kernel rebuild from a UI
+    // slider, say) can call `Fft2dPass::forward_2d` directly.
+    let _ = (fft2d, twiddles);
     let num_kernels = params.kernels.len() as u32;
     assert!(
         num_kernels >= 1,
         "KernelParams must have at least one kernel"
     );
-    let cells_per_kernel = (n * n) as usize;
+    let n_usize = n as usize;
+    let cells_per_kernel = n_usize * n_usize;
+
+    // M6.C-3-8 follow-up — web hang fix. Previously this helper called
+    // `Fft2dPass::forward_2d` for each kernel, which internally does
+    // `device.poll(PollType::Wait)` + sync `mpsc::recv` on the
+    // readback. Both block the JS main thread on the web target and
+    // hang indefinitely (the wasm-bindgen-driven event loop can't
+    // drain submitted GPU work without yielding back to JS first), so
+    // the browser never reached the `flow-lenia-web ready:` log and
+    // the canvas stayed black at any `Auto→Fft` grid (64 / 256 / 512).
+    //
+    // Switching to CPU `rustfft` removes the GPU-side blocking call:
+    // the kernel forward 2D FFT is computed in Rust, packed into the
+    // existing `vec2<f32>` layout, and uploaded once at startup. The
+    // per-step GPU FFT path (`Fft2dPass::forward_2d_with_scratch` +
+    // `SpectralMultiplyPass` + inverse) is unchanged.
+    //
+    // Numerical equivalence: the existing
+    // `fft_1d_radix4_matches_rustfft_n{64,256}` and
+    // `fft_2d_round_trip_n*` tests pin GPU radix-4 vs rustfft to
+    // ~1e-6 rel. Switching the kernel side to rustfft thus stays
+    // within the same numerical envelope as the GPU path it replaces.
+    let mut planner = FftPlanner::<f32>::new();
+    let fft1d = planner.plan_fft_forward(n_usize);
 
     let mut all_kernels_fft: Vec<f32> =
         Vec::with_capacity(num_kernels as usize * cells_per_kernel * 2);
@@ -170,18 +197,43 @@ pub fn precompute_kernel_ffts(
     for entry in &params.kernels {
         let kernel = compute_kernel(params.r_global, entry);
         let padded = build_padded_kernel(&kernel, n);
-        let spectrum = fft2d.forward_2d(ctx, twiddles, &padded);
-        debug_assert_eq!(spectrum.len(), cells_per_kernel);
-        for c in &spectrum {
-            all_kernels_fft.push(c[0]);
-            all_kernels_fft.push(c[1]);
+
+        // 2D FFT = N row-FFTs + N column-FFTs of an N×N real input.
+        // rustfft requires Complex32 buffers; we convert in-place
+        // (real input → complex with imag=0).
+        let mut data: Vec<Complex32> = padded
+            .iter()
+            .map(|&v| Complex32::new(v, 0.0))
+            .collect();
+
+        // Row pass: FFT each row of length N.
+        for row in 0..n_usize {
+            let start = row * n_usize;
+            fft1d.process(&mut data[start..start + n_usize]);
+        }
+        // Column pass: gather column → FFT → scatter back.
+        let mut col_buf: Vec<Complex32> = vec![Complex32::new(0.0, 0.0); n_usize];
+        for col in 0..n_usize {
+            for row in 0..n_usize {
+                col_buf[row] = data[row * n_usize + col];
+            }
+            fft1d.process(&mut col_buf);
+            for row in 0..n_usize {
+                data[row * n_usize + col] = col_buf[row];
+            }
+        }
+
+        debug_assert_eq!(data.len(), cells_per_kernel);
+        for c in &data {
+            all_kernels_fft.push(c.re);
+            all_kernels_fft.push(c.im);
         }
     }
 
     let buffer = ctx
         .device
         .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("kernel_fft buffer"),
+            label: Some("kernel_fft buffer (CPU rustfft, web-safe)"),
             contents: cast_slice(&all_kernels_fft),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });

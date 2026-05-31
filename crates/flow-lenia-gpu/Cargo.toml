@@ -18,6 +18,14 @@ glam.workspace = true
 log.workspace = true
 ndarray.workspace = true
 pollster.workspace = true
+# Promoted from dev-deps to regular deps for precompute_kernel_ffts:
+# the GPU `Fft2dPass::forward_2d` path uses `device.poll(PollType::Wait)`
+# + sync `mpsc::recv` which hangs forever on the web target (the JS
+# main thread can't block). Switching the one-shot kernel precompute
+# to CPU-side `rustfft` resolves the hang without touching the per-
+# step GPU path. Bundle cost: ~50-100 KB to the wasm — acceptable
+# given it unblocks Auto→Fft routing in the browser at N=64/256/512.
+rustfft = "6"
 
 [dev-dependencies]
 rand.workspace = true
@@ -29,8 +37,7 @@ image = { version = "0.24", default-features = false, features = ["png"] }
 # current / peak heap usage. dev-only so production binaries
 # (`flow-lenia-app`, `flow-lenia-web`) keep the system allocator.
 peak_alloc = "0.3"
-# M6.C-1-1 FFT primitive — CPU reference for forward-FFT bit-equal
-# comparison tests. dev-only; the GPU implementation is hand-written
-# WGSL in `src/shaders/fft_1d_radix4.wgsl`. `num-complex` is rustfft's
-# input/output type and is pulled in transitively as a dev-dep only.
-rustfft = "6"
+# (rustfft was previously dev-only for forward-FFT bit-equal tests;
+# promoted to regular dep above for the web-compatible kernel
+# precompute path. The reference still loads via the regular dep so
+# tests need no extra dependency line here.)
