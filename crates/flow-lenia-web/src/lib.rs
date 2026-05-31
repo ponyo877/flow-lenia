@@ -56,7 +56,7 @@ use winit::dpi::LogicalSize;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
-use winit::platform::web::{EventLoopExtWebSys, WindowAttributesExtWebSys};
+use winit::platform::web::WindowAttributesExtWebSys;
 use winit::window::{Window, WindowId};
 
 // M4.5.1 — global state cell so both the winit `ApplicationHandler`
@@ -1500,15 +1500,19 @@ pub fn run() {
     // dropped discrete events; pure `Poll` burned 90 % CPU on M1).
     event_loop.set_control_flow(ControlFlow::Poll);
     let proxy = event_loop.create_proxy();
-    let app = App::new(proxy);
-    // M6.C-3-8 follow-up — use winit's web-specific `spawn_app`
-    // instead of `run_app`. On web, `run_app` does NOT return: it
-    // suspends the synchronous Rust call by throwing a JS exception
-    // (visible as "Uncaught" via __wbg___wbindgen_throw in the
-    // browser console). `spawn_app` is the documented alternative
-    // that registers the event-loop callbacks asynchronously without
-    // the suspend-via-throw side-effect, so the console stays clean.
-    // It takes the app by value (not `&mut`) because the underlying
-    // dispatcher needs to own it across async callback boundaries.
-    event_loop.spawn_app(app);
+    let mut app = App::new(proxy);
+    // M6.C-3-8 follow-up note — earlier commit (8667a9e) tried
+    // `EventLoopExtWebSys::spawn_app` to suppress winit's
+    // suspend-via-throw "Uncaught" log. spawn_app dispatched
+    // `resumed` correctly (build_app_state ran, surface format log
+    // appeared) but proxy.send_event(AppEvent::GpuReady) silently
+    // failed to reach `user_event`, so APP_STATE never populated and
+    // the canvas stayed black with a heavy idle tab. Reverted to
+    // `run_app`: the "Uncaught (__wbg___wbindgen_throw)" log is
+    // winit-on-web's documented suspend mechanism and is functionally
+    // harmless (the wasm_bindgen-driven event_loop continues from
+    // async callbacks after the synchronous Rust stack unwinds).
+    event_loop
+        .run_app(&mut app)
+        .expect("event loop terminated with error");
 }
