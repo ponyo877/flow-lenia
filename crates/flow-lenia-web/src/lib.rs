@@ -89,12 +89,12 @@ const CANVAS_H: u32 = 512;
 /// pixels of horizontal room (matches the `egui::SidePanel::right`
 /// call below; keep them in sync).
 const SIDE_PANEL_W: u32 = 250;
-// M6.C-3-8 follow-up (browser 512 試行): default を 64 → 512 に変更。
-// Stage 2 final (BENCH §18) で M1 native 41.3 sps を達成済み、Chrome
-// WebGPU 上は更に遅い可能性 (~25-35 sps 想定)。32〜256 へは UI Grid
-// combo から戻せる。
-const GRID_W: u32 = 512;
-const GRID_H: u32 = 512;
+// M6.C-3-8 follow-up: default は 256 (Stage 1 main target、M1 native
+// 146 sps、Chrome WebGPU でも余裕)。512 は Grid combo から user 明示
+// 選択 (browser main thread が WebGPU pipeline で飽和、extension call
+// も時間ぎれするほど heavy なので default にはしない)。
+const GRID_W: u32 = 256;
+const GRID_H: u32 = 256;
 const SEED: u64 = 1729;
 
 fn demo_cfg() -> FlowLeniaConfig {
