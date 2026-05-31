@@ -183,11 +183,25 @@ pub fn precompute_kernel_ffts(
     // per-step GPU FFT path (`Fft2dPass::forward_2d_with_scratch` +
     // `SpectralMultiplyPass` + inverse) is unchanged.
     //
-    // Numerical equivalence: the existing
-    // `fft_1d_radix4_matches_rustfft_n{64,256}` and
-    // `fft_2d_round_trip_n*` tests pin GPU radix-4 vs rustfft to
-    // ~1e-6 rel. Switching the kernel side to rustfft thus stays
-    // within the same numerical envelope as the GPU path it replaces.
+    // Numerical equivalence: `fft_2d_forward_matches_rustfft_n*`
+    // measures GPU radix-4 vs rustfft as
+    //   N=64  rel = 7.095e-6
+    //   N=256 rel = 3.759e-5
+    //   N=512 rel = 5.012e-5
+    // (run `cargo test --release -p flow-lenia-gpu --lib
+    // fft_2d_forward_matches_rustfft -- --nocapture` to refresh).
+    // Switching the kernel-side forward 2D FFT to CPU rustfft
+    // therefore introduces a per-cell kernel-spectrum perturbation
+    // bounded by ~5e-5 rel at the production grid sizes — a
+    // *static seed perturbation* injected once at startup, NOT a
+    // per-step truncation. The 10-step field rel observed in
+    // `m1_regression_gpu` at g64/g256 after the switch is the
+    // Lyapunov amplification of this static seed
+    // (g64 2.221e-4, g256 4.397e-4 at HEAD vs g64 2.239e-4 / g256
+    // 2.174e-4 pre-switch). Both remain well under the A.4.5
+    // tolerance budget (5e-4 / 2.5e-3) and below the BENCH §8
+    // baseline 1.1e-3 g256 the tolerance was calibrated against,
+    // so the swap is bounded by existing design margin.
     let mut planner = FftPlanner::<f32>::new();
     let fft1d = planner.plan_fft_forward(n_usize);
 

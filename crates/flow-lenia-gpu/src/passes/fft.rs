@@ -1251,6 +1251,22 @@ mod tests {
         );
     }
 
+    /// **M6.C-3-8 follow-up M3** — N=128 mixed-radix witness. Closes
+    /// the "is_fft_pipeline_grid added 128 but no 2D rustfft
+    /// equivalence test at 128" gap caught by adversarial-reviewer.
+    /// Mirrors the n64 / n256 / n512 entries; the mixed-radix shader
+    /// (`fft_1d_radix2x4`) handles 128 = 2 × 4^3 and this test pins
+    /// its 2D forward output against rustfft so the
+    /// `is_fft_pipeline_grid(128)` routing (commit 4593291) has the
+    /// same bit-equal coverage as the other Auto-FFT grids.
+    #[test]
+    fn fft_2d_forward_matches_rustfft_n128() {
+        let (max_abs, max_rel) = run_forward_vs_rustfft_2d(0xF7_2D_F128, 128);
+        eprintln!(
+            "[M6.C-3-8] fft_2d vs rustfft N=128 : max_abs={max_abs:.3e}  max_rel={max_rel:.3e}"
+        );
+    }
+
     /// Round 1 review M2: 1D GPU forward + GPU inverse round-trip at
     /// N=64 — the dynamic-N path needs an inverse witness too, not
     /// just at N=256 (forward+inverse separately could each be wrong

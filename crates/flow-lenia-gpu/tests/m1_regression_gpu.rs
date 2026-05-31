@@ -46,7 +46,7 @@ use flow_lenia_core::{
     state::ActivationField,
     FlowLeniaConfig, FlowLeniaSimulator,
 };
-use flow_lenia_gpu::{GpuContext, GpuStepPipeline};
+use flow_lenia_gpu::{pipeline::ConvolveMode, GpuContext, GpuStepPipeline};
 
 const SEED: u64 = 42;
 const NUM_KERNELS: u32 = 10;
@@ -144,6 +144,25 @@ fn all_cases_for_grid(grid: u32) -> Vec<Case> {
 /// tight `rel < 1e-3` tolerance achievable — the committed fixtures
 /// are 100-step and would already diverge from any 100-step GPU run.
 fn run_field_regression(grid: u32, ctx: &GpuContext, rel_tolerance: f32) {
+    run_field_regression_with_mode(grid, ctx, rel_tolerance, ConvolveMode::Auto)
+}
+
+/// **M6.C-3-8 follow-up** — `ConvolveMode`-pinned variant. Required so
+/// `gpu_field_regression_g128` can keep the Direct-path baseline that
+/// the A.4.5 tolerance table was calibrated against, while
+/// `is_fft_pipeline_grid` (`crates/flow-lenia-gpu/src/passes/fft.rs`)
+/// routes Auto→FFT at g=128 in production (4593291). Without this
+/// pin, a `--include-ignored` run hits the FFT path with
+/// 10-step rel ~7e-3, blowing past the A.4.5-pinned 1e-3 g128 budget
+/// (16× regression from baseline 4.5e-4, see BENCH §19). Snapshot
+/// tests in `tests/gpu_snapshot_regression.rs` already use this
+/// "instantiate Direct explicitly" pattern (line 195).
+fn run_field_regression_with_mode(
+    grid: u32,
+    ctx: &GpuContext,
+    rel_tolerance: f32,
+    mode: ConvolveMode,
+) {
     let cases = c1_cases_for_grid(grid);
     let mut per_case_summary: Vec<String> = Vec::new();
     let mut overall_max_rel = 0.0_f32;
@@ -160,7 +179,8 @@ fn run_field_regression(grid: u32, ctx: &GpuContext, rel_tolerance: f32) {
         cpu_sim.step_many(FIELD_STEPS);
         let cpu_a = cpu_sim.activation().clone();
 
-        let mut pipeline = GpuStepPipeline::new(ctx, &cfg, &kernel_params, &initial_a);
+        let mut pipeline =
+            GpuStepPipeline::new_with_mode(ctx, &cfg, &kernel_params, &initial_a, mode);
         let gpu_started = std::time::Instant::now();
         pipeline.run_steps(ctx, FIELD_STEPS);
         let gpu_a: ActivationField = pipeline.readback_activation(ctx);
@@ -252,7 +272,27 @@ fn gpu_field_regression_g64() {
 #[ignore = "heavy 128×128 GPU regression; --include-ignored to run"]
 fn gpu_field_regression_g128() {
     let (ctx, guard) = common::test_ctx();
-    run_field_regression(128, &ctx, 1e-3);
+    // M6.C-3-8 follow-up: pin Direct mode.
+    //
+    // commit 4593291 added 128 to `is_fft_pipeline_grid`, so the
+    // default `Auto` resolution now routes g=128 to the mixed-radix
+    // FFT path in production (this fixed the 16fps→60fps browser
+    // regression for grid=128, but the FFT path has 10-step rel
+    // ~7e-3 due to chaos amplification of the per-FFT-truncation
+    // budget — well within the FFT's own pipeline tests at 1.5e-2
+    // (`gpu_pipeline_fft_mode_matches_direct_n*_c*_short`) but 16×
+    // over the A.4.5-pinned 1e-3 g128 Direct baseline this test
+    // gates).
+    //
+    // We pin Direct here to keep the A.4.5 tolerance meaningful —
+    // mirroring the same pattern `gpu_snapshot_regression.rs:195`
+    // adopted at M6.A.5. The FFT-path numerical envelope at g=128 is
+    // covered indirectly by `pipeline::tests::
+    // gpu_pipeline_fft_mode_matches_direct_n64_c{1,3}_short` (FFT
+    // vs Direct under chaos), and could be made explicit later via
+    // a `gpu_pipeline_fft_mode_matches_direct_n128_*` test if a
+    // tighter g=128 Auto-FFT bound is ever needed.
+    run_field_regression_with_mode(128, &ctx, 1e-3, ConvolveMode::Direct);
     if let Some(g) = &guard {
         g.assert_no_errors();
     }

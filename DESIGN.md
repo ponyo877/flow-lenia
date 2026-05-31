@@ -1,10 +1,60 @@
-# Flow-Lenia WebGPU Visualizer — 設計書 (Rev. 4.9)
+# Flow-Lenia WebGPU Visualizer — 設計書 (Rev. 4.10)
 
 本書は Rust + WebAssembly + WebGPU で **Flow-Lenia (Plantec et al., 2025, Artificial Life journal, arXiv:2506.08569v1)** を厳密に再現し、ブラウザ上でリアルタイム可視化する実装の設計書である。
 
 **実装の正典**は `papers/2506.08569v1.pdf` (2025年版) であり、Equation 番号は同論文を指す。副参照として `papers/2212.07906v2.pdf` (2023年版)、Moroz, 2020 "Reintegration tracking"、**公式 JAX 実装** `references/FlowLenia-jax/` (commit `dce428c`, 2024-02-08) を用いる。JAX 実装の精読結果は `references/JAX_NOTES.md` を参照。
 
 ## Rev. 履歴
+
+### Rev.4.10 (2026-05-31、M6.C-3 正式締め + web 動作検証 + Chrome 5 罠記録)
+
+- **M6.C-3-8 follow-up 8 commits で web 動作確認 完了**:
+  - Apple Metal native で通る code が Chrome Tint/Dawn 厳密 validator で
+    5 件の壁、`515465a` 〜 `f81e7d4` で順次解消 (BENCH §19 詳細)
+  - Chrome WebGPU 上 **512 Constant FFT mode = 46.5 fps 実機確認**、
+    Stage 2 が browser でも reproducible
+  - 128 grid 16fps → 60fps (mixed-radix FFT routing 副産物、UX 改善)
+  - 5 罠を memory に保存 (`feedback_web_chrome_webgpu_pitfalls`)、
+    将来の web build で先回り checklist
+- **Stage 2 final 数値 (Rev.4.9 確認、推定値追記)**:
+  - 512×Constant FFT: **41-46 sps** (native 43.5 / Chrome 46.5)
+  - 512×4creature Localized FFT: **41 sps native / ~44 sps Chrome 推定値**
+    (Localized overhead 1.05× 既知、実機未測定 — web app に 4 creature
+    UI 追加が必要、M6.C-3 締めスコープ外で後日 separate commit 可)
+  - judgment C (40-50 sps バケット → 案 a 確定) Rev.4.9 と同一、native
+    と Chrome 両方で再現可能と裏付け
+- **60 fps 達成は案 Y で f16 NG 判明 (Entry 7)、Stage 1 die-line 保護
+  優先で 41-46 sps 案 a 確定**:
+  - 将来 60 fps path: f16 全層化は per-step truncation の chaos
+    amplification で Stage 1 g256 を 916× regression、structural に
+    NG
+  - 残された path: subgroup matrix (Chrome 限定、案 P)、Apple Silicon
+    の register/cache architecture を活かす別アプローチ、HW 更新待ち
+- **web 修正の数値検証 (adversarial-reviewer 重点 review 反映)**:
+  - `1afd656` CPU rustfft 化: GPU radix-4 vs rustfft envelope は
+    N=64 7.1e-6 / N=128 3.967e-5 / N=256 3.759e-5 / N=512 5.012e-5
+    (実測、M6.C-3-8 で N=128 witness 新規追加で完備)
+  - g256 10-step rel: 2.174e-4 → 4.397e-4 (Lyapunov amplification of
+    static seed perturbation)、BENCH §8 design intent baseline 1.1e-3 を
+    依然下回り、tolerance 2.5e-3 内 safe
+  - `e371dfd` uniform-CF barrier wrap: 数値完全不変 (production WG
+    size == n で dead code、reviewer 直接実機確認)
+  - case Y との structural difference: 本件は once-at-startup static
+    seed perturbation、case Y は per-step f16 truncation で fresh
+    divergence 累積、質的に異なる
+- **g128 m1_regression disposition**:
+  - `4593291` で production Auto routing が g128 Direct → FFT
+  - `gpu_field_regression_g128` test を `ConvolveMode::Direct` で pin
+    (snapshot_regression.rs:195 と同 pattern)、A.4.5 baseline
+    4.460e-4 を保護、production routing は変更維持
+  - FFT 経路 g128 envelope は `fft_2d_forward_matches_rustfft_n128`
+    (新規) + 既存 mixed-radix bit-equal で cover
+- **§8 マイルストーン状態**: M6.A/B/C-1/C-2/C-3 = ✅、**Stage 1 主目標
+  達成 (256, 146 sps)、Stage 2 案 a (512, 41-46 sps native + Chrome)
+  で確定**、次は M5 (進化的探索 + Eq. 8 stochastic sampling) へ
+- **CLAUDE.md updates**: Chrome WebGPU 5 罠 (Apple Metal で通ったが
+  Chrome で壊れる) を memory に保存 + BENCH §19 に詳細記録、今後の
+  web build で check 必須
 
 ### Rev.4.9 (2026-05-30、M6.C-3 完了 + Stage 2 final 案 a 確定)
 

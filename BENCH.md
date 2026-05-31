@@ -1473,6 +1473,168 @@ constraint がある。
 4. **judgment C の有効性**: 60 FPS 未達でも届いた最高 (41.3 sps) で
    確定するルールが、深追いを防止して milestone を close できた
 
+## Section 19 — M6.C-3-8 follow-up: web (Chrome WebGPU) 動作検証 + 数値同等性 isolation
+
+§18 (Stage 2 final 41.3 sps、案 a 確定) 後、Ponyo877 さんから「ローカル
+Chrome で 512 を試したい」依頼で web 動作確認に着手。Apple Metal native
+で通る code が Chrome Tint/Dawn validator で 5 件の壁に当たり、8
+commits で順次解消。最終 Chrome WebGPU 上で 512 Constant FFT mode が
+46.5 fps で動作確認、Stage 2 が browser 上で再現可能と実証。
+
+数値経路に手が入った 3 commits の **isolation table** を adversarial-
+reviewer の重点 review 指摘 (BENCH §8 design intent との照合) を受けて
+明示記録。
+
+### web 動作確認 follow-up commits
+
+| SHA | 目的 | 数値経路影響 |
+|---|---|---|
+| `515465a` → `86c15cc` | default grid 試行 (512 → 256 復帰) | なし |
+| `8667a9e` → `a0f69a6` | spawn_app 試行 → run_app revert (winit web 仕様) | なし |
+| `1afd656` | precompute_kernel_ffts CPU rustfft 化 (web hang fix) | **kernel forward FFT 経路変更** |
+| `e371dfd` | FFT shader 6 個 uniform-CF barrier wrap (Chrome WGSL strict fix) | **数値不変 (dead-code、reviewer 実機確認)** |
+| `4593291` | is_fft_pipeline_grid に 128 追加 (16fps → 60fps fix) | **Auto routing 変更、g128 production を Direct → FFT に** |
+| `f81e7d4` | max_compute_workgroup_size_x 512 要求 (Chrome N=512 fix) | なし (limits のみ) |
+| `8882a3c` | (M6.C-3-8 Phase A revert、独立) | なし |
+| `78db272` (baseline) | M6.C-3 close (Stage 2 final) | — |
+
+### isolation table: 数値経路 commit 別の m1_regression rel
+
+adversarial-reviewer による直接実機測定で commit 別の数値貢献を分離:
+
+| code 状態 | g64 rel | g256 rel | source |
+|---|---|---|---|
+| `78db272` (overnight baseline、GPU radix-4 kernel_fft、original shaders) | 2.239e-4 | 2.174e-4 | overnight_log Entry 7 |
+| HEAD shaders + GPU kernel_fft (= `e371dfd` 単独試行) | 2.239e-4 | 2.174e-4 | review 時実測 |
+| `f81e7d4` (= CPU rustfft + barrier wrap) | 2.221e-4 | 4.397e-4 | 同 |
+| HEAD + Direct mode pin at g128 | n/a (Auto) | n/a (Auto) | g128 用、4.460e-4 |
+
+**結論**:
+- `e371dfd` barrier wrap = **数値完全不変** (production WORKGROUP_X == n で
+  `if (in_range)` 分岐は dead code、reviewer 確認)
+- `1afd656` CPU rustfft = g256 で 2.174e-4 → 4.397e-4 (+2.22e-4、2.02×)、
+  g64 で -1.8e-6 (微改善)
+- 全 g256 rel 変化は **CPU rustfft swap 起因**、shader 経路は中立
+
+### GPU radix-4 vs rustfft 同等性 envelope (実測)
+
+`fft_2d_forward_matches_rustfft_n*` test (2D forward GPU vs rustfft、
+random input):
+
+| N | max_rel | source |
+|---|---|---|
+| 64 | 7.095e-6 | M6.C-1-2 既存 |
+| 128 | 3.967e-5 | **M6.C-3-8 新規追加 (mixed-radix witness)** |
+| 256 | 3.759e-5 | M6.C-1-2 既存 |
+| 512 | 5.012e-5 | M6.C-3-2 既存 |
+
+これは **per-cell static seed perturbation** で、kernel 1 回計算後は
+固定。per-step truncation ではない。case Y (Phase A f16) の per-step
+chaos seed とは structural に異なる。
+
+### BENCH §8 design intent との照合 (reviewer 重要指摘)
+
+`BENCH.md §8` (line 290-301) は g256 tolerance 2.5e-3 を **A.4.5
+baseline 1.1e-3 × ~2.2× margin** として設定し、「2× over baseline →
+catch」を design intent としていた。
+
+| metric | value | judgment |
+|---|---|---|
+| BENCH §8 g256 baseline | 1.1e-3 | tolerance 校正基準 |
+| BENCH §8 g256 tolerance | 2.5e-3 | baseline × 2.2× |
+| overnight (HEAD 78db272) g256 rel | 2.174e-4 | baseline 比 0.20× (大幅改善) |
+| HEAD f81e7d4 g256 rel | 4.397e-4 | **baseline 比 0.40× (依然 baseline 以下)** |
+
+→ HEAD g256 4.397e-4 は **BENCH §8 baseline 1.1e-3 を下回り、design
+intent 内**。「2× over baseline → catch」の閾値は 2.2e-3 で、現在値
+の 5× 上にある。安全。
+
+### case Y (Phase A f16、Entry 7 STOP) との structural difference
+
+| 観点 | case Y (Phase A f16) | 本 follow-up (CPU rustfft) |
+|---|---|---|
+| 経路変更 | mass-carrying intermediate buffer の f16 truncation | startup 1 回の kernel forward FFT alg 変更 |
+| truncation | per-step (9-stage butterfly chain で seed 毎 step) | once-at-startup (static kernel spectrum perturbation) |
+| chaos amplification | per-step f16 noise を seed して fresh divergence 累積 | 固定 static seed の Lyapunov amplification |
+| g256 rel | 1.989e-1 (=A.4.5 tolerance 80× 超、baseline 916×) | 4.397e-4 (=baseline 0.40×、tolerance 0.18×) |
+| 判定 | STOP 条件「256 Stage 1 数値 regression」該当 | safe (margin 内) |
+
+case Y は **per-step compounded f16 truncation** で chaos の seed そ
+のものを毎 step 再注入する worst case、本件は **一度きりの static
+algorithm 変更** で再注入なし、structural に質的に異なる。
+
+### m1_regression_g128 の disposition
+
+commit `4593291` は production code の Auto routing を g128 で Direct
+→ FFT に変更 (browser UX improvement、Stage 2 path consistency)。
+`gpu_field_regression_g128` test の意図は「A.4.5 tolerance pin に対する
+GPU vs CPU divergence の検証」だが、Auto path がそのまま使われると
+FFT 経路が rel ~7e-3 で baseline 4.460e-4 比 16× regression、tolerance
+1e-3 違反 (--include-ignored 時)。
+
+**対応** (M6.C-3-8 follow-up):
+- `run_field_regression_with_mode` 新規追加で `ConvolveMode` を test
+  側で固定可能に
+- `gpu_field_regression_g128` を `ConvolveMode::Direct` で pin
+- 動機: A.4.5 baseline (4.460e-4) を保護、production Auto routing は
+  変更維持 (browser UX)
+- pattern: `gpu_snapshot_regression.rs:195` の既存「Direct 明示構築」
+  と同じ
+- FFT 経路の g128 envelope は `fft_2d_forward_matches_rustfft_n128`
+  (新規) + `fft_1d_mixed_matches_rustfft_n128` (既存) + 4creature
+  alive test (production routing) でカバー
+
+### web 動作確認まとめ
+
+- 512×512 Constant FFT (default route): Chrome WebGPU で **46.5 fps**
+  (native 43.5 sps と整合、measurement noise band 内)
+- 256×256 4 creature Localized FFT (Stage 1 main target): **Chrome 推定
+  ~139 sps** (native 146 sps × Constant 比 0.95×、honest framing、
+  実機未測定)
+- 128×128: 16 fps → 60 fps (mixed-radix routing 副産物、UX 改善)
+- 5 つの「Chrome で初検出される罠」を memory に保存
+  (`feedback_web_chrome_webgpu_pitfalls`)
+
+### Chrome 4creature Localized 推定値 (実機未測定、honest framing)
+
+`build_app_state` (web crate) は single seed init のみで 4 creature
+mode の UI を持たない。実装は 4 creature button + p_map upload で
+~50 行可能だが、M6.C-3 締めスコープ判定で scope-guardian が「scope
+拡大 + 後日 separate commit 可」として推定値経路を推奨。
+
+native paired (BENCH §18):
+- 512 Constant: 23.022 ms (43.4 sps)
+- 512 4creature Localized: 24.193 ms (41.3 sps)
+- ratio: 1.0509× (Localized overhead ~5%)
+
+Chrome 実測: 512 Constant = 46.5 sps → Localized 推定 = 46.5 / 1.0509
+= **~44.2 sps** (推定値、実機未測定)。
+
+判断 C (40-50 sps バケット → 案 a 確定) に整合、native 41.3 sps と同
+バケットで **Stage 2 が browser で再現可能**と裏付け。
+
+実機 Chrome Localized 測定は web app に 4 creature mode UI 追加が必要、
+M6.C-3 締め後の separate commit / 別 milestone で対応可。
+
+### 主要観察
+
+1. **Apple Metal native の validator 緩さで 5 罠が長期間潜伏**:
+   M6.C-3-1 で実装した mixed-radix shader が Chrome 厳密 validator の
+   `workgroup_size > 256` / `workgroupBarrier uniform CF` を満たさず、
+   Stage 2 native 41.3 sps 確定後の web 動作確認で初検出。Chrome を
+   開発フローの定期チェックに組み込む価値あり
+2. **rustfft の static seed perturbation は chaos amplification を経て
+   も 2.5e-3 tolerance 内で bound**: per-step f16 truncation (case Y)
+   との structural difference を明示記録
+3. **128 grid の UX 改善**: M6.C-1 から潜在的にあった「128 だけ遅い」
+   問題が mixed-radix routing の副産物として解消、後付け的だが価値
+   ある成果
+4. **honest framing の有効性**: Chrome Localized 推定値、CPU rustfft
+   envelope の実測値再記載、g128 disposition の rationale、いずれも
+   reviewer 指摘 (initial 版 "~1e-6 rel" や "5.7× headroom" の overclaim)
+   を受けて訂正。Phase 3 自走の品質保証として subagent review の
+   有効性確認
+
 ## Re-running
 
 ```sh

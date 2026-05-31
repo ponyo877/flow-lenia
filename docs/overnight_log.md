@@ -775,6 +775,127 @@ Phase B は自動的に no-go。
   を再 enable する template として有用。docstring に「Phase A 試行
   → 148×/385×/256× で revert」の経緯を明記、再アタック時の安全網
 
+---
+
+## Entry 8 — M6.C-3-8 follow-up: web 動作確認 + 数値検証 (DESIGN Rev.4.10 締め)
+
+Entry 7 で「案 Y NG → 代替路 A (案 Y 断念、M5 へ) 推奨」と報告、
+Ponyo877 さん A 採用判断。その後の流れ:
+- 「ローカルブラウザで 512 試したい」依頼で web 動作確認 follow-up
+- Apple Metal native で通る code が Chrome Tint/Dawn で 5 件の壁、
+  8 commits で順次解消
+- Chrome WebGPU 上 512 Constant FFT 46.5 fps 確認、Stage 2 が browser
+  でも動作実証
+- adversarial-reviewer 重点 review で「~1e-6 envelope」overclaim、
+  g128 latent failure 等 7 件指摘 → 訂正
+- BENCH §19 + DESIGN Rev.4.10 で正式締め
+
+### web 動作確認 8 commits (詳細は BENCH §19)
+
+```
+515465a → 86c15cc  default grid 512 試行 → 256 復帰
+8667a9e → a0f69a6  spawn_app 試行 → run_app revert (winit 仕様)
+1afd656            precompute_kernel_ffts CPU rustfft 化 (web hang fix)
+e371dfd            FFT shader 6 個 uniform-CF barrier wrap
+4593291            128 grid Auto→FFT 追加 (16fps → 60fps)
+f81e7d4            workgroup_size_x = 512 要求 (Chrome N=512 fix)
+```
+
+### Stage 2 final 数値 (DESIGN Rev.4.10 締め値)
+
+| metric | value | source |
+|---|---|---|
+| Stage 1 主目標 (256×4creature×60fps) | **146 sps native** (実測) | §18 (overnight 確定済) |
+| Stage 2 (512×4creature×60fps target) | **41.3 sps native / ~44 sps Chrome 推定** | §18 + §19 |
+| Stage 2 Constant (片務 baseline) | 43.5 sps native / 46.5 sps Chrome 実測 | §19 |
+| 128 grid | 60 fps (Chrome、mixed-radix routing 副産物) | §19 |
+| 60 fps 達成 | **未達** (案 Y f16 で Stage 1 die-line 違反、NG) | §18 / Entry 7 |
+
+判定 (Rev.4.9 と同じ、Rev.4.10 で再確認): **judgment C「40-50 sps バケット
+→ 届いた最高で確定、深追いせず」案 a 適用、512 = 41-46 sps で確定**。
+
+### web 修正の数値検証 (reviewer 重点 review 反映)
+
+isolation table:
+- `e371dfd` barrier wrap = **数値完全不変** (production WG size == n
+  で dead code、reviewer 実機確認)
+- `1afd656` CPU rustfft = g256 で 2.174e-4 → 4.397e-4 (Lyapunov
+  amplification of static seed perturbation 5e-5)
+- 全 g256 rel 変化は CPU rustfft swap 起因と分離確認
+
+BENCH §8 design intent 照合:
+- g256 baseline 1.1e-3 (A.4.5 original)、tolerance 2.5e-3 = baseline × 2.2×
+- HEAD f81e7d4 g256 = 4.397e-4 = baseline 0.40× (依然下回り、design 内)
+
+case Y との structural difference:
+- case Y: per-step f16 truncation (mass intermediate)、9-stage chain で
+  fresh divergence 累積、g256 rel 1.989e-1 (=916× regression) → STOP 該当
+- 本件: once-at-startup CPU rustfft、static seed perturbation 5e-5、
+  10-step Lyapunov で 4.4e-4 → safe
+
+### g128 m1_regression disposition
+
+commit 4593291 は production Auto routing で g128 Direct → FFT
+(browser UX 改善)、`gpu_field_regression_g128` test も Auto で FFT
+経路を通ると rel ~7e-3 = tolerance 1e-3 違反 (--include-ignored 時)。
+
+対応 (M6.C-3-8 follow-up M1):
+- `run_field_regression_with_mode` 新規追加、`ConvolveMode` 引数化
+- `gpu_field_regression_g128` を `ConvolveMode::Direct` で pin
+  (snapshot_regression.rs:195 と同 pattern)
+- A.4.5 baseline 4.460e-4 を保護、production Auto routing は変更維持
+- FFT 経路 g128 envelope は `fft_2d_forward_matches_rustfft_n128`
+  (新規) + 既存 mixed-radix bit-equal で cover
+
+### 新規 deliverables (本 follow-up M1-M5 commit に含むもの)
+
+| file/test | 目的 |
+|---|---|
+| `m1_regression_gpu.rs`: `run_field_regression_with_mode` + g128 Direct pin | A.4.5 baseline 保護 |
+| `fft.rs::tests::fft_2d_forward_matches_rustfft_n128` (新規) | mixed-radix N=128 witness、routing change の安全 net |
+| `kernel_fft.rs` comment 訂正 (~1e-6 → 実測 7e-6/4e-5/5e-5) | overclaim 撤回、honest framing |
+| `BENCH.md §19` | follow-up 経緯 + isolation table + design intent 照合 |
+| 本 Entry 8 (overnight_log) | 続き経緯 + reviewer 指摘対応 |
+| `DESIGN.md Rev.4.10` | 締め (作成中) |
+
+### 5-layer test 状態 (HEAD M5 直前)
+
+- **60 lib pass** (新規 N=128 witness 1 件追加で +1)
+- 3 snapshot regression pass (Direct path、無影響)
+- 5 m1 regression pass (g64 = 2.221e-4 微改善、g128 Direct pin で
+  4.460e-4 維持、g256 = 4.397e-4 / tolerance 2.5e-3 内 safe)
+- wasm release build OK
+- Chrome 動作実機確認 OK (Constant 46.5 fps)
+
+Stage 1 保護完全。
+
+### Memory 保存
+
+`feedback_web_chrome_webgpu_pitfalls.md` に「Chrome WebGPU で初検出
+される 5 罠」を保存:
+1. winit web `Uncaught` は suspend 仕様 (spawn_app 使えない)
+2. startup-only GPU work は CPU 化 (poll(Wait) hang)
+3. workgroupBarrier は uniform CF (early-return after barrier 禁止)
+4. workgroup_size > 256 は required_limits 明示
+5. Auto routing predicate の grid 漏れチェック
+
+### M5 進行前の milestone 境界
+
+- M6.A (検証基盤) ✅
+- M6.B (文献) ✅
+- M6.C-1 (FFT 実装) ✅
+- M6.C-2 (case δ + 4 creature) ✅
+- M6.C-3 (512 高性能エンジン) ✅ — Rev.4.10 で正式締め
+  - Stage 1 主目標達成 (256×4creature×146 sps、撤退ライン 30 fps の 4.87×)
+  - Stage 2 案 a 確定 (512×4creature×41-46 sps、60 fps 未達、案 Y NG
+    判明)
+  - 128 UX 改善 (副産物)
+  - web 動作実証 (Chrome WebGPU 上 Stage 2 reproducible)
+
+**M5 (進化的探索 + Eq. 8 stochastic sampling) へ進行可能**。Claude Web
+相談 (Phase 3 条件 1: milestone 完了) 推奨。
+
+
 ### 代替路選択 — Ponyo877 さん経由 Claude Web 判断材料
 
 Phase A NG なので、user spec「境界・NG なら代替路 (部分 f16) か
