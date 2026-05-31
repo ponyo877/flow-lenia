@@ -96,11 +96,43 @@ impl GpuContext {
             info.backend
         );
 
+        // M6.C-3-8 follow-up — bump compute workgroup-size limits so the
+        // N=512 mixed-radix FFT shaders (`fft_1d_radix2x4{,_v,_inv_to_pre_g}`)
+        // compile under Chrome WebGPU's strict spec. Those shaders
+        // specialise `override WORKGROUP_X` to N at pipeline build:
+        // N=512 specialises to `workgroup_size(512, 1, 1)` (and 512
+        // invocations/workgroup), but `wgpu::Limits::default()` matches
+        // the WebGPU spec defaults of 256 / 256 — Chrome's Tint
+        // validator therefore rejected the pipeline with
+        // "Entry-point uses workgroup_size(512, 1, 1) that exceeds the
+        // maximum allowed (256, 256, 64) ... This adapter supports
+        // higher maxComputeWorkgroupSizeX of 1024 ...". Native Metal
+        // accepts 512 either way because its real-hardware limit is
+        // 1024 and wgpu does not validate against the requested
+        // `wgpu::Limits` on the native backend; only Chrome enforces
+        // the requested limit at pipeline creation.
+        //
+        // We request 512 unconditionally — every WebGPU 1.0 adapter
+        // (Apple M1+, Intel HD 530+, all modern dGPUs) ships ≥ 1024 —
+        // capping at the adapter's actual limit so an unusual adapter
+        // can't trigger a request-device panic. Other limits stay at
+        // spec defaults to keep the device profile portable.
+        let adapter_limits = adapter.limits();
+        let required_limits = wgpu::Limits {
+            max_compute_workgroup_size_x: 512.min(
+                adapter_limits.max_compute_workgroup_size_x,
+            ),
+            max_compute_invocations_per_workgroup: 512.min(
+                adapter_limits.max_compute_invocations_per_workgroup,
+            ),
+            ..wgpu::Limits::default()
+        };
+
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("flow-lenia-gpu::Device"),
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
+                required_limits,
                 memory_hints: wgpu::MemoryHints::default(),
                 // wgpu 27+ gates EXPERIMENTAL_* features behind this
                 // disabled-by-default ack token. We don't use any of
@@ -154,11 +186,24 @@ impl GpuContext {
                 adapter.features().contains(needed),
                 "adapter lacks TIMESTAMP_QUERY{{,_INSIDE_ENCODERS}} (profiling-only context)"
             );
+            // M6.C-3-8 follow-up — match the production `new()` limits
+            // so the timestamped bench can build the same N=512 FFT
+            // pipelines. See `new()` for the full rationale.
+            let adapter_limits = adapter.limits();
+            let required_limits = wgpu::Limits {
+                max_compute_workgroup_size_x: 512.min(
+                    adapter_limits.max_compute_workgroup_size_x,
+                ),
+                max_compute_invocations_per_workgroup: 512.min(
+                    adapter_limits.max_compute_invocations_per_workgroup,
+                ),
+                ..wgpu::Limits::default()
+            };
             let (device, queue) = adapter
                 .request_device(&wgpu::DeviceDescriptor {
                     label: Some("flow-lenia-gpu::Device (timestamps)"),
                     required_features: needed,
-                    required_limits: wgpu::Limits::default(),
+                    required_limits,
                     memory_hints: wgpu::MemoryHints::default(),
                     experimental_features: wgpu::ExperimentalFeatures::disabled(),
                     trace: wgpu::Trace::Off,
