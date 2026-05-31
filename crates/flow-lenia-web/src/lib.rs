@@ -56,7 +56,7 @@ use winit::dpi::LogicalSize;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
-use winit::platform::web::WindowAttributesExtWebSys;
+use winit::platform::web::{EventLoopExtWebSys, WindowAttributesExtWebSys};
 use winit::window::{Window, WindowId};
 
 // M4.5.1 — global state cell so both the winit `ApplicationHandler`
@@ -1500,8 +1500,15 @@ pub fn run() {
     // dropped discrete events; pure `Poll` burned 90 % CPU on M1).
     event_loop.set_control_flow(ControlFlow::Poll);
     let proxy = event_loop.create_proxy();
-    let mut app = App::new(proxy);
-    event_loop
-        .run_app(&mut app)
-        .expect("event loop terminated with error");
+    let app = App::new(proxy);
+    // M6.C-3-8 follow-up — use winit's web-specific `spawn_app`
+    // instead of `run_app`. On web, `run_app` does NOT return: it
+    // suspends the synchronous Rust call by throwing a JS exception
+    // (visible as "Uncaught" via __wbg___wbindgen_throw in the
+    // browser console). `spawn_app` is the documented alternative
+    // that registers the event-loop callbacks asynchronously without
+    // the suspend-via-throw side-effect, so the console stays clean.
+    // It takes the app by value (not `&mut`) because the underlying
+    // dispatcher needs to own it across async callback boundaries.
+    event_loop.spawn_app(app);
 }
