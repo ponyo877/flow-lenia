@@ -104,16 +104,18 @@ fn fft_1d_radix4_inv_to_pre_g(
     }
     let tid = lid.x;
     let n = params.n;
-    if (tid >= n) {
-        return;
-    }
+    // M6.C-3-8 follow-up: uniform-CF barrier (Chrome WGSL strict).
+    // See `fft_1d_radix4.wgsl` for the full rationale.
+    let in_range = tid < n;
     let row_base = row * n;
 
     // Load: digit-reversed conjugate (Method B inverse, see
     // fft_1d_radix4.wgsl header for the identity proof).
-    let src = digit_reverse_4_dynamic(tid, n);
-    let base = 2u * (row_base + src);
-    scratch[tid] = vec2<f32>(input[base], -input[base + 1u]);
+    if (in_range) {
+        let src = digit_reverse_4_dynamic(tid, n);
+        let base = 2u * (row_base + src);
+        scratch[tid] = vec2<f32>(input[base], -input[base + 1u]);
+    }
     workgroupBarrier();
 
     // log_4(n) radix-4 butterfly stages — identical to C-1-2 inverse.
@@ -159,9 +161,11 @@ fn fft_1d_radix4_inv_to_pre_g(
     // AND transpose to cell-major pre_g layout. The cell-major write
     // index is `(row * n + tid) * k_total + ki` — one f32 per cell
     // for the per-kernel slice ki.
-    let val = scratch[tid];
-    let inv_n = 1.0 / f32(n);
-    let real_result = val.x * inv_n;
-    let out_idx = (row_base + tid) * params.k_total + params.ki;
-    pre_g_out[out_idx] = real_result;
+    if (in_range) {
+        let val = scratch[tid];
+        let inv_n = 1.0 / f32(n);
+        let real_result = val.x * inv_n;
+        let out_idx = (row_base + tid) * params.k_total + params.ki;
+        pre_g_out[out_idx] = real_result;
+    }
 }

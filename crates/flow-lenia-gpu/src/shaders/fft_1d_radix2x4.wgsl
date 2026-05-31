@@ -97,23 +97,25 @@ fn fft_1d_radix2x4(
     }
     let tid = lid.x;
     let n = params.n;
-    if (tid >= n) {
-        return;
-    }
+    // M6.C-3-8 follow-up: uniform-CF barrier (Chrome WGSL strict).
+    // See `fft_1d_radix4.wgsl` for the full rationale.
+    let in_range = tid < n;
     let m = n / 2u; // M = 4^k, the radix-4 sub-DFT size
     let row_base = row * n;
 
     // Load with mixed-radix digit reversal:
     //   p = tid mod M, block = tid / M (0=even, 1=odd)
     //   src = 2·digit_reverse_4(p, M) + block
-    let p = tid % m;
-    let block = tid / m;
-    let src = 2u * digit_reverse_4_dynamic(p, m) + block;
-    if (params.direction == 0u) {
-        scratch[tid] = vec2<f32>(input[row_base + src], 0.0);
-    } else {
-        let base = 2u * (row_base + src);
-        scratch[tid] = vec2<f32>(input[base], -input[base + 1u]);
+    if (in_range) {
+        let p = tid % m;
+        let block = tid / m;
+        let src = 2u * digit_reverse_4_dynamic(p, m) + block;
+        if (params.direction == 0u) {
+            scratch[tid] = vec2<f32>(input[row_base + src], 0.0);
+        } else {
+            let base = 2u * (row_base + src);
+            scratch[tid] = vec2<f32>(input[base], -input[base + 1u]);
+        }
     }
     workgroupBarrier();
 
@@ -174,11 +176,13 @@ fn fft_1d_radix2x4(
 
     // Store: natural frequency order. Inverse closes Method B
     // (conjugate + 1/N).
-    let val = scratch[tid];
-    if (params.direction == 0u) {
-        output[row_base + tid] = val;
-    } else {
-        let inv_n = 1.0 / f32(n);
-        output[row_base + tid] = vec2<f32>(val.x, -val.y) * inv_n;
+    if (in_range) {
+        let val = scratch[tid];
+        if (params.direction == 0u) {
+            output[row_base + tid] = val;
+        } else {
+            let inv_n = 1.0 / f32(n);
+            output[row_base + tid] = vec2<f32>(val.x, -val.y) * inv_n;
+        }
     }
 }

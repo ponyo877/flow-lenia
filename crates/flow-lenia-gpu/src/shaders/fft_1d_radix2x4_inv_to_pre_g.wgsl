@@ -60,18 +60,20 @@ fn fft_1d_radix2x4_inv_to_pre_g(
     }
     let tid = lid.x;
     let n = params.n;
-    if (tid >= n) {
-        return;
-    }
+    // M6.C-3-8 follow-up: uniform-CF barrier (Chrome WGSL strict).
+    // See `fft_1d_radix4.wgsl` for the full rationale.
+    let in_range = tid < n;
     let m = n / 2u;
     let row_base = row * n;
 
     // Mixed-radix digit reversal + conjugate-load (Method B inverse).
-    let p = tid % m;
-    let block = tid / m;
-    let src = 2u * digit_reverse_4_dynamic(p, m) + block;
-    let base = 2u * (row_base + src);
-    scratch[tid] = vec2<f32>(input[base], -input[base + 1u]);
+    if (in_range) {
+        let p = tid % m;
+        let block = tid / m;
+        let src = 2u * digit_reverse_4_dynamic(p, m) + block;
+        let base = 2u * (row_base + src);
+        scratch[tid] = vec2<f32>(input[base], -input[base + 1u]);
+    }
     workgroupBarrier();
 
     // log₄(M) radix-4 DIT stages.
@@ -127,9 +129,11 @@ fn fft_1d_radix2x4_inv_to_pre_g(
 
     // Store: Method B close (conjugate + 1/N) AND drop imag AND
     // transpose to cell-major pre_g layout.
-    let val = scratch[tid];
-    let inv_n = 1.0 / f32(n);
-    let real_result = val.x * inv_n;
-    let out_idx = (row_base + tid) * params.k_total + params.ki;
-    pre_g_out[out_idx] = real_result;
+    if (in_range) {
+        let val = scratch[tid];
+        let inv_n = 1.0 / f32(n);
+        let real_result = val.x * inv_n;
+        let out_idx = (row_base + tid) * params.k_total + params.ki;
+        pre_g_out[out_idx] = real_result;
+    }
 }

@@ -70,21 +70,23 @@ fn fft_1d_radix2x4_v(
     }
     let tid = lid.x;
     let n = params.n;
-    if (tid >= n) {
-        return;
-    }
+    // M6.C-3-8 follow-up: uniform-CF barrier (Chrome WGSL strict).
+    // See `fft_1d_radix4.wgsl` for the full rationale.
+    let in_range = tid < n;
     let m = n / 2u;
 
     // Mixed-radix digit reversal, column-stride load. V-axis input is
     // always complex; inverse conjugates on load (Method B).
-    let p = tid % m;
-    let block = tid / m;
-    let src_row = 2u * digit_reverse_4_dynamic(p, m) + block;
-    let base = 2u * (src_row * n + col);
-    if (params.direction == 0u) {
-        scratch[tid] = vec2<f32>(input[base], input[base + 1u]);
-    } else {
-        scratch[tid] = vec2<f32>(input[base], -input[base + 1u]);
+    if (in_range) {
+        let p = tid % m;
+        let block = tid / m;
+        let src_row = 2u * digit_reverse_4_dynamic(p, m) + block;
+        let base = 2u * (src_row * n + col);
+        if (params.direction == 0u) {
+            scratch[tid] = vec2<f32>(input[base], input[base + 1u]);
+        } else {
+            scratch[tid] = vec2<f32>(input[base], -input[base + 1u]);
+        }
     }
     workgroupBarrier();
 
@@ -141,12 +143,14 @@ fn fft_1d_radix2x4_v(
     workgroupBarrier();
 
     // Store: column-stride; inverse closes Method B (conjugate + 1/N).
-    let val = scratch[tid];
-    let out_idx = tid * n + col;
-    if (params.direction == 0u) {
-        output[out_idx] = val;
-    } else {
-        let inv_n = 1.0 / f32(n);
-        output[out_idx] = vec2<f32>(val.x, -val.y) * inv_n;
+    if (in_range) {
+        let val = scratch[tid];
+        let out_idx = tid * n + col;
+        if (params.direction == 0u) {
+            output[out_idx] = val;
+        } else {
+            let inv_n = 1.0 / f32(n);
+            output[out_idx] = vec2<f32>(val.x, -val.y) * inv_n;
+        }
     }
 }

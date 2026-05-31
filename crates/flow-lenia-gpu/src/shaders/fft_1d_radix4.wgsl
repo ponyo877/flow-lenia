@@ -121,10 +121,20 @@ fn fft_1d_radix4(
     }
     let tid = lid.x;
     let n = params.n;
-    if (tid >= n) {
-        return;
-    }
     let row_base = row * n;
+
+    // **Uniform control flow for `workgroupBarrier()`** (Chrome WGSL
+    // strict-spec, M6.C-3-8 follow-up fix). An earlier version exited
+    // with `if (tid >= n) return;` before the barrier — Metal/Naga
+    // accepted that, but Chrome's Tint validator rejects it because
+    // `tid = lid.x` is non-uniform across the workgroup and an early
+    // return makes the subsequent barrier itself non-uniform. Threads
+    // with `tid >= n` (only when WORKGROUP_X > params.n) now skip the
+    // load/store but **still reach every barrier**, which is what WGSL
+    // requires. In practice WORKGROUP_X == n for the {64, 256} sizes
+    // this shader serves, so the guard is dead code; it stays in for
+    // spec compliance.
+    let in_range = tid < n;
 
     // Load: bit/digit-reversed input → complex scratch. For
     // direction=forward the input is real (imag = 0); for
@@ -132,12 +142,14 @@ fn fft_1d_radix4(
     // load** (negate imag) so the unchanged forward butterfly
     // produces conj(N * IDFT) which the store-side conjugation
     // converts back to N * IDFT, then /N gives IDFT.
-    let src = digit_reverse_4_dynamic(tid, n);
-    if (params.direction == 0u) {
-        scratch[tid] = vec2<f32>(input[row_base + src], 0.0);
-    } else {
-        let base = 2u * (row_base + src);
-        scratch[tid] = vec2<f32>(input[base], -input[base + 1u]);
+    if (in_range) {
+        let src = digit_reverse_4_dynamic(tid, n);
+        if (params.direction == 0u) {
+            scratch[tid] = vec2<f32>(input[row_base + src], 0.0);
+        } else {
+            let base = 2u * (row_base + src);
+            scratch[tid] = vec2<f32>(input[base], -input[base + 1u]);
+        }
     }
     workgroupBarrier();
 
@@ -188,11 +200,13 @@ fn fft_1d_radix4(
     // conjugate the butterfly output (close the identity `IDFT(y) =
     // (1/N) conj(DFT(conj(y)))`) and normalise by 1/N (rustfft
     // convention: forward unnormalised, inverse divides by N).
-    let val = scratch[tid];
-    if (params.direction == 0u) {
-        output[row_base + tid] = val;
-    } else {
-        let inv_n = 1.0 / f32(n);
-        output[row_base + tid] = vec2<f32>(val.x, -val.y) * inv_n;
+    if (in_range) {
+        let val = scratch[tid];
+        if (params.direction == 0u) {
+            output[row_base + tid] = val;
+        } else {
+            let inv_n = 1.0 / f32(n);
+            output[row_base + tid] = vec2<f32>(val.x, -val.y) * inv_n;
+        }
     }
 }

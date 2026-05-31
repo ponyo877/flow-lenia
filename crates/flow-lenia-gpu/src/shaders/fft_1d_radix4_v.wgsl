@@ -105,9 +105,11 @@ fn fft_1d_radix4_v(
     }
     let tid = lid.x;
     let n = params.n;
-    if (tid >= n) {
-        return;
-    }
+    // M6.C-3-8 follow-up: Chrome strict WGSL needs every workgroupBarrier
+    // in uniform control flow. See `fft_1d_radix4.wgsl` for the full
+    // rationale; same fix applied here (wrap load/store in `if (in_range)`
+    // instead of early-returning on `tid >= n`).
+    let in_range = tid < n;
 
     // Load: digit-reversed-base-4 row index, column-stride access.
     // `input` is bound as `array<f32>` and each complex sample is two
@@ -116,12 +118,14 @@ fn fft_1d_radix4_v(
     // imag) — see fft_1d_radix4.wgsl header for the identity.
     // Same `if`-style as the H-axis sibling for cross-file readability
     // (Round 1 review N2).
-    let src_row = digit_reverse_4_dynamic(tid, n);
-    let base = 2u * (src_row * n + col);
-    if (params.direction == 0u) {
-        scratch[tid] = vec2<f32>(input[base], input[base + 1u]);
-    } else {
-        scratch[tid] = vec2<f32>(input[base], -input[base + 1u]);
+    if (in_range) {
+        let src_row = digit_reverse_4_dynamic(tid, n);
+        let base = 2u * (src_row * n + col);
+        if (params.direction == 0u) {
+            scratch[tid] = vec2<f32>(input[base], input[base + 1u]);
+        } else {
+            scratch[tid] = vec2<f32>(input[base], -input[base + 1u]);
+        }
     }
     workgroupBarrier();
 
@@ -168,12 +172,14 @@ fn fft_1d_radix4_v(
 
     // Store: column-stride; inverse closes the conjugate identity
     // (negate imag) and divides by N.
-    let val = scratch[tid];
-    let out_idx = tid * n + col;
-    if (params.direction == 0u) {
-        output[out_idx] = val;
-    } else {
-        let inv_n = 1.0 / f32(n);
-        output[out_idx] = vec2<f32>(val.x, -val.y) * inv_n;
+    if (in_range) {
+        let val = scratch[tid];
+        let out_idx = tid * n + col;
+        if (params.direction == 0u) {
+            output[out_idx] = val;
+        } else {
+            let inv_n = 1.0 / f32(n);
+            output[out_idx] = vec2<f32>(val.x, -val.y) * inv_n;
+        }
     }
 }
